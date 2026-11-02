@@ -13,7 +13,7 @@
     {
       "path": "SOURCE_MANIFEST.json",
       "bytes": 60725,
-      "sha256": "242f9ea7dacff81a07542af82a2ebd005652cb67efed6e17addd8161d1fb39da"
+      "sha256": "2cb68dcab6950cd180d4f8041d445f6e1b721027c803cbc2ab6a0c7eda788233"
     },
     {
       "path": "canonical_region_train.py",
@@ -732,13 +732,13 @@
     },
     {
       "path": "paper/ParaMeld-Chinese-source.zip",
-      "bytes": 1503795,
-      "sha256": "4574ef2678aee1301a8468503066813002afe0ed642595530d95f4d3a4de06c7"
+      "bytes": 1503739,
+      "sha256": "749b80d6e9d3a64bf6501dfcad92898c4b27343bcc2701fa8e8dd1614f06b777"
     },
     {
       "path": "paper/ParaMeld-Chinese.pdf",
-      "bytes": 1124491,
-      "sha256": "f54250effa9300e8deff1e9ec9f1d06f217c46d9c078cc6bd56f671b5d9c14fe"
+      "bytes": 1124352,
+      "sha256": "b852818b455e8817616868c7188af0f083c932ddb5828f535da5225cc7e87306"
     },
     {
       "path": "paramorph/README.md",
