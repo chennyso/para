@@ -4,8 +4,10 @@
 
 ## 论文
 
-- [中文论文 PDF（正文、参考文献与附录，共21页）](paper/ParaMeld-Chinese.pdf)
+- [中文论文 PDF（正文、参考文献与附录）](paper/ParaMeld-Chinese.pdf)
 - [LaTeX 源文件与矢量图片](paper/ParaMeld-Chinese-source.zip)
+
+论文分别说明完整策略核验、条件分区、可选路径构造与训练反馈。逐轮试验图与Lightning容量修复表保留真实策略变化、结果选择及失败状态。
 
 ## 代码
 
