@@ -7,13 +7,13 @@
     },
     {
       "path": "README.md",
-      "bytes": 3280,
-      "sha256": "edf463ca97789cb31e650d844c89d03447c53c466b3d978c10fb500d29d5ce0b"
+      "bytes": 3537,
+      "sha256": "835c39451a248a54ddaa8a77bd0c7c4806abc52095bace761c5d11d04672b6fe"
     },
     {
       "path": "SOURCE_MANIFEST.json",
-      "bytes": 60938,
-      "sha256": "2395bb54e8b5277d6f1e3c196979929ec857dd512fae77033a14f5e516a05c93"
+      "bytes": 60725,
+      "sha256": "242f9ea7dacff81a07542af82a2ebd005652cb67efed6e17addd8161d1fb39da"
     },
     {
       "path": "canonical_region_train.py",
@@ -29,6 +29,11 @@
       "path": "data/archival/component-ablation.csv",
       "bytes": 374,
       "sha256": "bbf1df88f930983d4d2f0074333f10204858488a44803e5c961272ca497011cc"
+    },
+    {
+      "path": "data/archival/nine-model-pvc-audit.csv",
+      "bytes": 836,
+      "sha256": "322fec2b50973ec4493567da47ebef12bce58a457655b396535b3b817602678c"
     },
     {
       "path": "data/archival/nine-model-summary.csv",
@@ -726,19 +731,14 @@
       "sha256": "81414a195605b680a8a6ba3064047cbbc43894af9c4e9e0003f0ff1881541ede"
     },
     {
-      "path": "paper/ParaMeld-Chinese-Supplement.pdf",
-      "bytes": 377072,
-      "sha256": "95e27aab07574429ea55f23255581239853a03748f171d8397c428c6c22e83a1"
-    },
-    {
       "path": "paper/ParaMeld-Chinese-source.zip",
-      "bytes": 1570770,
-      "sha256": "dd1698163d54a91bf599f890280dd70f07af80b78a73604bb986296536e585af"
+      "bytes": 1503795,
+      "sha256": "4574ef2678aee1301a8468503066813002afe0ed642595530d95f4d3a4de06c7"
     },
     {
       "path": "paper/ParaMeld-Chinese.pdf",
-      "bytes": 995264,
-      "sha256": "2eceeaeb75e7526a2affc14ef03e32802d5d791170ad3593739444a3cd249682"
+      "bytes": 1124491,
+      "sha256": "f54250effa9300e8deff1e9ec9f1d06f217c46d9c078cc6bd56f671b5d9c14fe"
     },
     {
       "path": "paramorph/README.md",

@@ -1439,17 +1439,12 @@
     {
       "path": "paper/ParaMeld-Chinese.pdf",
       "original_filename": "ParaMeld-Chinese.pdf",
-      "sha256": "2eceeaeb75e7526a2affc14ef03e32802d5d791170ad3593739444a3cd249682"
-    },
-    {
-      "path": "paper/ParaMeld-Chinese-Supplement.pdf",
-      "original_filename": "ParaMeld-Chinese-Supplement.pdf",
-      "sha256": "95e27aab07574429ea55f23255581239853a03748f171d8397c428c6c22e83a1"
+      "sha256": "f54250effa9300e8deff1e9ec9f1d06f217c46d9c078cc6bd56f671b5d9c14fe"
     },
     {
       "path": "paper/ParaMeld-Chinese-source.zip",
       "original_filename": "ParaMeld-Chinese-source.zip",
-      "sha256": "dd1698163d54a91bf599f890280dd70f07af80b78a73604bb986296536e585af"
+      "sha256": "4574ef2678aee1301a8468503066813002afe0ed642595530d95f4d3a4de06c7"
     }
   ]
 }

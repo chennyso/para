@@ -4,8 +4,7 @@
 
 ## 论文
 
-- [中文论文 PDF](paper/ParaMeld-Chinese.pdf)
-- [中文补充材料 PDF](paper/ParaMeld-Chinese-Supplement.pdf)
+- [中文论文 PDF（正文、参考文献与附录，共21页）](paper/ParaMeld-Chinese.pdf)
 - [LaTeX 源文件与矢量图片](paper/ParaMeld-Chinese-source.zip)
 
 ## 代码
@@ -47,10 +46,11 @@ python paramorph/experiments/run_system_search.py \
 | `data/measurements/fp16-fp32-pairs.csv` | 四模型、八项完整 GPU 配对测量汇总 |
 | `data/agents/trials.csv` | 本次实验 240 条候选的并行参数、生效策略和实际状态 |
 | `data/optico/trials.csv` | OptiCo 作者实现的 18 次策略与结果 |
+| `data/archival/nine-model-pvc-audit.csv` | 九模型主表的 PVC 来源与提升核查 |
 
 四模型配对使用 FP16 计算，主参数、主梯度和 Adam 状态使用 FP32；每项策略独立运行一次，预热 5 次更新、测量 30 次更新。吞吐按最慢 Rank 的平均更新时间计算，显存使用所有 Rank 中的最大分配量。MFU 使用记录的模型 FLOPs 和每张 GPU 209.5 TFLOP/s 的参考峰值计算。这八项汇总已与 128 份逐 Rank 测量核对。
 
-归档表格沿用原论文数值，原始重复测量的对应关系状态为 `PARTIAL_RAW_SUPPORT`。失败和未完成候选保留原有状态，缺失测量保持空值。OptiCo 数据保存作者后端及提交身份，使用各自记录的后端条件。完整历史 PVC 记录与逐 Rank 输出保存在实验档案中。
+归档表格沿用原论文数值。重新读取700项历史运行和8项近期运行、复算10,640份逐Rank计时后，原主表27项吞吐与显存尚未找到同时匹配的记录，也未找到对应的三次重复组合，其数据来源状态保留为未核实。四模型近期配对测量与各自原始记录一致。失败和未完成候选保留原有状态，缺失测量保持空值。OptiCo数据保存作者后端及提交身份。完整历史PVC记录与逐Rank输出保存在实验档案中。
 
 公开数据删除私人路径、集群访问地址和认证信息。`MANIFEST.json` 保存公开文件的 SHA-256，`SOURCE_MANIFEST.json` 保存源码与论文文件的原始摘要。
 
