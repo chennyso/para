@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+.DS_Store
+local-work/
+search-output/
+*.sqlite*
+*.pt
+*.safetensors
+*.ckpt
+*.log
+*.aux
+*.bbl
+*.blg
+*.synctex.gz

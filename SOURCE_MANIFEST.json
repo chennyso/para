@@ -1,0 +1,1455 @@
+{
+  "snapshot_date": "2026-11-02",
+  "copied_artifacts": [
+    {
+      "path": "paramorph/README.md",
+      "original_filename": "README.md",
+      "sha256": "6d4dfe280e92a4f6471d5140c03413b39f9ab9b09c22d786aa04285c50140b6c"
+    },
+    {
+      "path": "paramorph/SYSTEM_CAPABILITIES.md",
+      "original_filename": "SYSTEM_CAPABILITIES.md",
+      "sha256": "4acfa3dc60e0b6ba8ddf1fae0471262aba2ec6939cba7ae9b8efad35d565c2d2"
+    },
+    {
+      "path": "paramorph/adapters/megatron_adapter.py",
+      "original_filename": "megatron_adapter.py",
+      "sha256": "29ff486557c8c7c55ca03546aca5b46cff08ea95fc76f2e8d36199ffc47d963a"
+    },
+    {
+      "path": "paramorph/adapters/nccl_batch.py",
+      "original_filename": "nccl_batch.py",
+      "sha256": "bb2d6ff3cdf60cf7424a944fabf0f7324d4167effecb97c4bc4d73cbd1fcc42e"
+    },
+    {
+      "path": "paramorph/agents/architect_agent.py",
+      "original_filename": "architect_agent.py",
+      "sha256": "4ea4e67a4f38c58113de8e529a3d273c1ed5460f64c71bf709d07ea7e229cd40"
+    },
+    {
+      "path": "paramorph/agents/context_budget.py",
+      "original_filename": "context_budget.py",
+      "sha256": "b54af57a5d9df0efe81a549deb68f59957979e17f82ef79bd5f12212fe84e717"
+    },
+    {
+      "path": "paramorph/agents/critic_agent.py",
+      "original_filename": "critic_agent.py",
+      "sha256": "ff9012d812ad650623a8453168e08105ee6dd83d53324376a473020057acd4c5"
+    },
+    {
+      "path": "paramorph/agents/decision_service.py",
+      "original_filename": "decision_service.py",
+      "sha256": "bb25b3632518d90806ce2ab9f7303f73545a6877fa20f97e1109f720c79c7b39"
+    },
+    {
+      "path": "paramorph/agents/evidence_policy.py",
+      "original_filename": "evidence_policy.py",
+      "sha256": "87e1e8d5467bcff4ce362c41295adffd04c60acf491dca38b0036c7dd61793b0"
+    },
+    {
+      "path": "paramorph/agents/program_agent.py",
+      "original_filename": "program_agent.py",
+      "sha256": "eee972bc1dba25a14e55b36a1b6182e0f1407eb8157e8e7d15f398e4ba05a543"
+    },
+    {
+      "path": "paramorph/agents/prompts/constraint_validation_agent.md",
+      "original_filename": "constraint_validation_agent.md",
+      "sha256": "f284255403cd7c5624d208cebbae6ac5a0361154a38138cfe70befa2b5b98782"
+    },
+    {
+      "path": "paramorph/agents/prompts/experiment_investigation_agent.md",
+      "original_filename": "experiment_investigation_agent.md",
+      "sha256": "66452e4238c147603f40c1246268f28fd3dd1140d092e55dbfe02e4054bdb97f"
+    },
+    {
+      "path": "paramorph/agents/prompts/joint_strategy_agent.md",
+      "original_filename": "joint_strategy_agent.md",
+      "sha256": "9c7c150a0c4bdb1bc56ee71259c0466bb0c862b5ecaff6347230b529751a34a1"
+    },
+    {
+      "path": "paramorph/agents/prompts/performance_analysis_agent.md",
+      "original_filename": "performance_analysis_agent.md",
+      "sha256": "c7c0595151da3dbe87919215684537b83f518564a5f9a1639090eb5558242780"
+    },
+    {
+      "path": "paramorph/agents/prompts/planning_investigation_agent.md",
+      "original_filename": "planning_investigation_agent.md",
+      "sha256": "9c6eda3079112654a4ab84a574b329c3996d5241bb421514b1ea356356ec2f8e"
+    },
+    {
+      "path": "paramorph/agents/prompts/planning_portfolio_agent.md",
+      "original_filename": "planning_portfolio_agent.md",
+      "sha256": "316f531d36ff34968eafb95f2ef00462669a6f68c02044602456353c98d656ab"
+    },
+    {
+      "path": "paramorph/agents/prompts/training_optimization_knowledge.md",
+      "original_filename": "training_optimization_knowledge.md",
+      "sha256": "40cbab51ce14d8433a8ff85b256fb526e8d7dc3d4b36ee1d7b77277dc07be5a2"
+    },
+    {
+      "path": "paramorph/agents/strategy_transformations.py",
+      "original_filename": "strategy_transformations.py",
+      "sha256": "c02d64bc367c823f494d145a196eefb866a242cace1de6bcb46e894dbc9a2f9e"
+    },
+    {
+      "path": "paramorph/calibration_plan_compiler.py",
+      "original_filename": "calibration_plan_compiler.py",
+      "sha256": "67075f7c2008e89facf4ae6f24dc850a7dc201a078810fa4fdd255943e267b15"
+    },
+    {
+      "path": "paramorph/communication_calibration.py",
+      "original_filename": "communication_calibration.py",
+      "sha256": "166c7585c08f4482f2774a0fac426ef84c5eb5d192af4d099396b81b5b33d059"
+    },
+    {
+      "path": "paramorph/communication_executor.py",
+      "original_filename": "communication_executor.py",
+      "sha256": "2909cf2ccb669ef88a3e1e8eef736715d7dae1220e0c401f79707d86b960bda0"
+    },
+    {
+      "path": "paramorph/contracts.py",
+      "original_filename": "contracts.py",
+      "sha256": "07028b0644a7a84badec2cc258c8a837745979d190f6694b7faa0d99fd92d6fe"
+    },
+    {
+      "path": "paramorph/core_data_models.py",
+      "original_filename": "core_data_models.py",
+      "sha256": "cbf27f2fe3b32635199602e99d11592ed0f64acbcffbbe06192acb7b2a3e18da"
+    },
+    {
+      "path": "paramorph/cost/analytical_model.py",
+      "original_filename": "analytical_model.py",
+      "sha256": "ca6b14193059e9213895b5a877047b41c0814791f589f6100a5458959957ba30"
+    },
+    {
+      "path": "paramorph/cost/cost_model.py",
+      "original_filename": "cost_model.py",
+      "sha256": "d25e50ef25e5070b15b9befd46e790ce2d8cbb36970d3e4eab19c21f76849735"
+    },
+    {
+      "path": "paramorph/cost/decomposition.py",
+      "original_filename": "decomposition.py",
+      "sha256": "ad84fe69d2b41475abfe2544929bf25d9471b6e2c04ccd0e53bc36b3e6ae4ede"
+    },
+    {
+      "path": "paramorph/cost/layer_calibration.py",
+      "original_filename": "layer_calibration.py",
+      "sha256": "f95216eebe072a02176c5ee7963be109baa10780ac3c0ff1fe16fa6a5cbd1dd3"
+    },
+    {
+      "path": "paramorph/cost/plan_calibration.py",
+      "original_filename": "plan_calibration.py",
+      "sha256": "5a67966f761cbd529b1504882b7e94473a4675435f17dc3f903f17317907e1d9"
+    },
+    {
+      "path": "paramorph/cost/rank_memory_model.py",
+      "original_filename": "rank_memory_model.py",
+      "sha256": "905b125a3534397c03af0f0a65f17d33a4713e6c59dfa39b7c6c3412693792e0"
+    },
+    {
+      "path": "paramorph/cost/runtime_calibration.py",
+      "original_filename": "runtime_calibration.py",
+      "sha256": "7e1a680dade570d9548287dd3ff424949879084a38ca3301b07d4d4005ba9f80"
+    },
+    {
+      "path": "paramorph/evaluation/prediction_metrics.py",
+      "original_filename": "prediction_metrics.py",
+      "sha256": "5dc72ff582b0c4d53ac0c3016fc39f61277bd043eee4e3765ced74b6883d6e9c"
+    },
+    {
+      "path": "paramorph/evaluation/system_report.py",
+      "original_filename": "system_report.py",
+      "sha256": "3e2421ae6f2adfaedbaf7ada32850d3c0156fc7f38960e3c5df73fe53c7b1b22"
+    },
+    {
+      "path": "paramorph/experiments/benchmark_predictor.py",
+      "original_filename": "benchmark_predictor.py",
+      "sha256": "512cc573505f8b2d3f5b824ca00ab2fc30efc425835ad034729f1847039d2985"
+    },
+    {
+      "path": "paramorph/experiments/check_direct_provider.py",
+      "original_filename": "check_direct_provider.py",
+      "sha256": "b204b7091ded7bd27c1e86dfc3b0d442f31a060d2c9326aa8ca76d6482d75125"
+    },
+    {
+      "path": "paramorph/experiments/derive_effective_execution.py",
+      "original_filename": "derive_effective_execution.py",
+      "sha256": "1ba4aff18c3b89b31c0c0ba6ae270cd5aef1f922375be3aa324fb45b4d887fd1"
+    },
+    {
+      "path": "paramorph/experiments/evaluate_calibration_campaign.py",
+      "original_filename": "evaluate_calibration_campaign.py",
+      "sha256": "448f606d07bc1e3f609933e3df55eedb7caa4ea66778d44859427244e43c6769"
+    },
+    {
+      "path": "paramorph/experiments/export_checkpoint_shapes.py",
+      "original_filename": "export_checkpoint_shapes.py",
+      "sha256": "0a746e37c304ec1918d5e75cfb89b1838ae4855d0514959b2cfb6e687bf0e0e9"
+    },
+    {
+      "path": "paramorph/experiments/generate_final_report.py",
+      "original_filename": "generate_final_report.py",
+      "sha256": "54ba6dd9b0e4088bd78a8b6c0f12b58bdacbe4b36affa421d3db451e92f906f1"
+    },
+    {
+      "path": "paramorph/experiments/measure_memory.py",
+      "original_filename": "measure_memory.py",
+      "sha256": "2daa3f105618cbf7ea494de3b6683ceb88ec895b0c39046ccbd3ecde3a5b4331"
+    },
+    {
+      "path": "paramorph/experiments/plot_search_progress.py",
+      "original_filename": "plot_search_progress.py",
+      "sha256": "cabdce71cce81757ccb5c99e5045a7f488c09563013ce6b909d67b69e4928bc1"
+    },
+    {
+      "path": "paramorph/experiments/prepare_predictor_measurements.py",
+      "original_filename": "prepare_predictor_measurements.py",
+      "sha256": "ca671d797e2076cb9820466aa6544fe570663817f07b5da1af706ffaa442912d"
+    },
+    {
+      "path": "paramorph/experiments/restore_failed_training_pod.py",
+      "original_filename": "restore_failed_training_pod.py",
+      "sha256": "f8e174c730923b4c363743744ad1d2bde65cbb45f7767502b662c47a2f2ecb4e"
+    },
+    {
+      "path": "paramorph/experiments/run_nccl_profile.py",
+      "original_filename": "run_nccl_profile.py",
+      "sha256": "e493397a79560c0621d877a0a494e8e64ca6588be1b592c00282607c7169b22f"
+    },
+    {
+      "path": "paramorph/experiments/run_parameter_ledger.py",
+      "original_filename": "run_parameter_ledger.py",
+      "sha256": "5bd2f2d7b1867820843c6068b9de565129f60e631882b08f60c76f0edfc9e577"
+    },
+    {
+      "path": "paramorph/experiments/run_physical_stage_comparison.py",
+      "original_filename": "run_physical_stage_comparison.py",
+      "sha256": "8487c7b0a3fc9c79e82c94d1373d8417179561707c8f4e2f16e507eac2b5f056"
+    },
+    {
+      "path": "paramorph/experiments/run_system_search.py",
+      "original_filename": "run_system_search.py",
+      "sha256": "298d7aef3bd39ae9f3263d0159992e409d9946711bf8b6a07c7817a934627e79"
+    },
+    {
+      "path": "paramorph/experiments/run_validation_tests.py",
+      "original_filename": "run_validation_tests.py",
+      "sha256": "da035800f2229f459db79c9320837e4b417ed2589cf9d48d70a86f1a9a40eb83"
+    },
+    {
+      "path": "paramorph/experiments/validate_blind_profiles.py",
+      "original_filename": "validate_blind_profiles.py",
+      "sha256": "69fa58cbae649adc6b39c0b37613d8c8440a2cada2882795b736a17421f00446"
+    },
+    {
+      "path": "paramorph/experiments/validate_conditional_partition.py",
+      "original_filename": "validate_conditional_partition.py",
+      "sha256": "4c06f0261513589ce6d8a34a2e3e061919b8436c1e1af13d2be170f99269b358"
+    },
+    {
+      "path": "paramorph/experiments/validate_ddp_bucket_rewrite.py",
+      "original_filename": "validate_ddp_bucket_rewrite.py",
+      "sha256": "267fdd834f0a7c835075ecd6ba108dfb119c5438a306ac2ea4261d8e8783b31a"
+    },
+    {
+      "path": "paramorph/experiments/validate_joint_synthesis.py",
+      "original_filename": "validate_joint_synthesis.py",
+      "sha256": "5ab66f64943b7d46cde0c5ffedb298570493966b6212af53f6161dfb11d6d4b6"
+    },
+    {
+      "path": "paramorph/experiments/validate_layered_agent.py",
+      "original_filename": "validate_layered_agent.py",
+      "sha256": "db966c775abb1dd6e6a5a15434b571a8a649323dc702713d454cd46f5462fd74"
+    },
+    {
+      "path": "paramorph/experiments/validate_layered_context.py",
+      "original_filename": "validate_layered_context.py",
+      "sha256": "b17b7946d84e5dc0d8802a6e554bdee70517d7d9988a1a92f5336b405965fa98"
+    },
+    {
+      "path": "paramorph/experiments/validate_predictor_corrections.py",
+      "original_filename": "validate_predictor_corrections.py",
+      "sha256": "e387438932b41b5dcd7db541a87a71619809580bea0456b10425d7065dc76db1"
+    },
+    {
+      "path": "paramorph/experiments/validate_system_integration.py",
+      "original_filename": "validate_system_integration.py",
+      "sha256": "fe7edc508c38855ddccd3bea625afcb5b6f5e4914630336bc92be30410e5744c"
+    },
+    {
+      "path": "paramorph/experiments/verify_best_training.py",
+      "original_filename": "verify_best_training.py",
+      "sha256": "0bdb4dfa860da4fa5a913e3c5158f62a423e0d6c20eb263ab9fe742fe73fda38"
+    },
+    {
+      "path": "paramorph/experiments/verify_parameter_ledger.py",
+      "original_filename": "verify_parameter_ledger.py",
+      "sha256": "89d6c811a9467ed892fe05554346da54bdc04380b0e574a4e97f2d20aa9127b7"
+    },
+    {
+      "path": "paramorph/graph/bottleneck_analysis.py",
+      "original_filename": "bottleneck_analysis.py",
+      "sha256": "cd0ea7fc5c94dc9ec7e64adafd19feb9b917d9ee25e59b322cad4a708949d93d"
+    },
+    {
+      "path": "paramorph/graph/capability_registry.py",
+      "original_filename": "capability_registry.py",
+      "sha256": "640180611d19dfc0e5ea8ee99b1dbfa31525c20a26732cb7ddcf570f71fc36a0"
+    },
+    {
+      "path": "paramorph/graph/complete_rewrite.py",
+      "original_filename": "complete_rewrite.py",
+      "sha256": "a752c9309110a1bef9ec881e7a2420f73e77e32cfd47e7f2d0a987a47e4f7758"
+    },
+    {
+      "path": "paramorph/graph/finalize_model_grads.py",
+      "original_filename": "finalize_model_grads.py",
+      "sha256": "138a7c8747d93a5a35cecfce421d6fedd31f4c7ac9fe2ed00ddda2e952ab24ea"
+    },
+    {
+      "path": "paramorph/graph/model_graph.py",
+      "original_filename": "model_graph.py",
+      "sha256": "85853f735e3dfa3f50a8da37ad9c7349ee22dcc60f0ee543be342e836265d878"
+    },
+    {
+      "path": "paramorph/graph/native_recomputation.py",
+      "original_filename": "native_recomputation.py",
+      "sha256": "e7443258a2ae3b16bf8002b4cd66d51f6c698aca197c7fca2d870e4033126bc4"
+    },
+    {
+      "path": "paramorph/graph/process_groups.py",
+      "original_filename": "process_groups.py",
+      "sha256": "21af7613c25387f40710e5b08071a9990324df9a6705b9ed412fa0f02143d5b7"
+    },
+    {
+      "path": "paramorph/history/history_manager.py",
+      "original_filename": "history_manager.py",
+      "sha256": "50dffe983956d8e3140ba1c8eec02caf5a5df24b71294155ad47e991d6eb227a"
+    },
+    {
+      "path": "paramorph/memory_audit.py",
+      "original_filename": "memory_audit.py",
+      "sha256": "575e14bdecf2840361fb5ce40cb946755d58268236aedb9a0a4269625b27cce9"
+    },
+    {
+      "path": "paramorph/memory_failure.py",
+      "original_filename": "memory_failure.py",
+      "sha256": "9fc71d74a2a512a1eac0b1be8b5f8244c2db998308102233a0932506fa88a8bc"
+    },
+    {
+      "path": "paramorph/numerical_reference.py",
+      "original_filename": "numerical_reference.py",
+      "sha256": "952964f34cc6e06276ea00649cb9ead3c178b0949b1e0440396ffa69d66a9a60"
+    },
+    {
+      "path": "paramorph/operator_profiling.py",
+      "original_filename": "operator_profiling.py",
+      "sha256": "80327aaa2af61897ba999b2371d223c19636eb88ec0179f82055e8ce9841e080"
+    },
+    {
+      "path": "paramorph/paramorph_cli.py",
+      "original_filename": "paramorph_cli.py",
+      "sha256": "43d5e61295ca25b1b44cc93fec9dbf5c39dd9d293e2c2d89284a81ab5e79f093"
+    },
+    {
+      "path": "paramorph/pp_vpp_communication_test.py",
+      "original_filename": "pp_vpp_communication_test.py",
+      "sha256": "f3845509b699d1c037dc09f911edb7723c16c6ea760c8d237a407c13e747425c"
+    },
+    {
+      "path": "paramorph/predictor/__init__.py",
+      "original_filename": "__init__.py",
+      "sha256": "cf57ac242404bd8ca1126bb0f129a3cec1ddfefb1d3f86e2307eddbc8b2c2f2b"
+    },
+    {
+      "path": "paramorph/predictor/communication_cost.py",
+      "original_filename": "communication_cost.py",
+      "sha256": "e5dd35bb0db3eccda7dd066773cb4cc558c72342041412448f0a47c166a4024b"
+    },
+    {
+      "path": "paramorph/predictor/compute_cost.py",
+      "original_filename": "compute_cost.py",
+      "sha256": "70f747f4ec147113163e3551a44da5d62de98c3393d0bafba5ad3b2d70c15feb"
+    },
+    {
+      "path": "paramorph/predictor/dag_projection.py",
+      "original_filename": "dag_projection.py",
+      "sha256": "201edcf7d11cba660662c05e6b0f6d4cbb1c369115785451d1578412de695929"
+    },
+    {
+      "path": "paramorph/predictor/ddp_buckets.py",
+      "original_filename": "ddp_buckets.py",
+      "sha256": "2723981c6c67834ca6e4b48ade4bb19b1068e77f0cfd839dd02c6f61c1560318"
+    },
+    {
+      "path": "paramorph/predictor/fast_predictor.py",
+      "original_filename": "fast_predictor.py",
+      "sha256": "86fd00216a11f722125a6103c0dced79612bc8388015ceb08ba7eae60e51cf55"
+    },
+    {
+      "path": "paramorph/predictor/graph_delta.py",
+      "original_filename": "graph_delta.py",
+      "sha256": "e226298a8a53beed762261bd5fae5390c1b6e93f8a1d2a948ea026c9dc0edf7d"
+    },
+    {
+      "path": "paramorph/predictor/measured_modules.py",
+      "original_filename": "measured_modules.py",
+      "sha256": "10546665389628d7e439062c7cbe8d6287dc8e757b9e55ae47776519b8c52b1a"
+    },
+    {
+      "path": "paramorph/predictor/native_parameter_layout.py",
+      "original_filename": "native_parameter_layout.py",
+      "sha256": "8892c79c71a046e2eca59ad594669292a552c89d460278a5435c11cfcf64adb0"
+    },
+    {
+      "path": "paramorph/predictor/overlap_cost.py",
+      "original_filename": "overlap_cost.py",
+      "sha256": "cc0f0a66854f921f62761c84de2eda36b8858c142428bd45de3513df7b4e16c0"
+    },
+    {
+      "path": "paramorph/predictor/parameter_metadata.py",
+      "original_filename": "parameter_metadata.py",
+      "sha256": "48383c7d3f578985ef801fc50b982bfe8707bea160c0822ed5e164f719e5cb77"
+    },
+    {
+      "path": "paramorph/predictor/physical_paths.py",
+      "original_filename": "physical_paths.py",
+      "sha256": "8714aec3851d668f1e97170b998805f1a4fcc0d84d09f1d23c7dd214c9399f11"
+    },
+    {
+      "path": "paramorph/predictor/profile_database.py",
+      "original_filename": "profile_database.py",
+      "sha256": "e8fe6b08b45f54985ab54dd8c055b4bc06f26752fae8c1c3e2faf0caaad2a635"
+    },
+    {
+      "path": "paramorph/predictor/state_sharding.py",
+      "original_filename": "state_sharding.py",
+      "sha256": "223792d45b1cb10627fa70855abacc3ecd1a2707ea81950c377524afef1f6125"
+    },
+    {
+      "path": "paramorph/progress_validator.py",
+      "original_filename": "progress_validator.py",
+      "sha256": "aa8c78776af2c8d35f40c35bff9091f2bb376e390af46405f32c9ac8a83b027c"
+    },
+    {
+      "path": "paramorph/region_partition/region_optimizer.py",
+      "original_filename": "region_optimizer.py",
+      "sha256": "3f9f2977eb6274cd33d71f60d4540f2f129104af715cdf892d43981831cc5668"
+    },
+    {
+      "path": "paramorph/region_partition/region_partitioner.py",
+      "original_filename": "region_partitioner.py",
+      "sha256": "a919db75aad00cf68a94bf180ed41394502eaaed8fee5bc1257782585c5cabfe"
+    },
+    {
+      "path": "paramorph/requirements.txt",
+      "original_filename": "requirements.txt",
+      "sha256": "c6f74c00e8d07b0850f0a3934f07715bf8a1499ed22e7c326a08ddad98f3c763"
+    },
+    {
+      "path": "paramorph/runtime.py",
+      "original_filename": "runtime.py",
+      "sha256": "f8acf7d59860bbe12d31e3bf9ab32b27c476aaf78b78224fb0bac924ef7fd5a1"
+    },
+    {
+      "path": "paramorph/runtime_executor.py",
+      "original_filename": "runtime_executor.py",
+      "sha256": "9ab195a72ae7105ac3a671be6ec8a20733f92dac60076e31a83f9e4e7d9502e8"
+    },
+    {
+      "path": "paramorph/schedule_validator.py",
+      "original_filename": "schedule_validator.py",
+      "sha256": "ad111d38ee0bb627730f4ca7a6ff0615cd10f93e78df1f4429feda93c5d01f46"
+    },
+    {
+      "path": "paramorph/scheduling/critical_path.py",
+      "original_filename": "critical_path.py",
+      "sha256": "d7cc909a83126e6e3d833e9fef8f3801a73806989b2c74d6a84e59ad0011a49d"
+    },
+    {
+      "path": "paramorph/scheduling/gpcs.py",
+      "original_filename": "gpcs.py",
+      "sha256": "73a3a6f14f9a2d12fa6f63bca23588e2a74c77ff63baa6292164a0b9c33bef7e"
+    },
+    {
+      "path": "paramorph/scheduling/microbatch_scheduler.py",
+      "original_filename": "microbatch_scheduler.py",
+      "sha256": "df3777d6c47f959c9b367d85c6d6148e75ee948719e9f76c6eb4e68517a7d4c1"
+    },
+    {
+      "path": "paramorph/scheduling/native_microbatches.py",
+      "original_filename": "native_microbatches.py",
+      "sha256": "2b908206fa7bbb2b6f232bad3595d0e7617a0086793403c5d1feb52c7801a446"
+    },
+    {
+      "path": "paramorph/scheduling/schedule_simulator.py",
+      "original_filename": "schedule_simulator.py",
+      "sha256": "b62a2f56cdc33bc4f46e0f91a9dfd53e36924c73a14176f85a725fd282660284"
+    },
+    {
+      "path": "paramorph/scheduling/task_graph_builder.py",
+      "original_filename": "task_graph_builder.py",
+      "sha256": "746fb7580634ef8e7c66ed32b046429ae8a8c927d036a2a8360d6a42987fb683"
+    },
+    {
+      "path": "paramorph/search/candidate_generator.py",
+      "original_filename": "candidate_generator.py",
+      "sha256": "a504b10e71be10d81a0cf1dc5a8ad1fa07800556099e0d1a7b61c2e42d766273"
+    },
+    {
+      "path": "paramorph/search/communication_placement.py",
+      "original_filename": "communication_placement.py",
+      "sha256": "0d64121c751ed3ed6a4d172185f4482d4b52fce942961804e38adb1412a85a12"
+    },
+    {
+      "path": "paramorph/search/complete_partition.py",
+      "original_filename": "complete_partition.py",
+      "sha256": "d8c2a80b4cad393323da850c023ef1540eb6c4ffa3ba07aa9e4db011682d9880"
+    },
+    {
+      "path": "paramorph/search/complete_strategy.py",
+      "original_filename": "complete_strategy.py",
+      "sha256": "2c580ad775934dded53b0788163ae3c670fc0ea57dfe776d975213e0a9d323fb"
+    },
+    {
+      "path": "paramorph/search/conditional_partition.py",
+      "original_filename": "conditional_partition.py",
+      "sha256": "2cad6852d3b07460a26340c504e97502ed8fa5e6b139323f41f6cae6949b17cc"
+    },
+    {
+      "path": "paramorph/search/continuation.py",
+      "original_filename": "continuation.py",
+      "sha256": "f214ad8701e2b8d13a1457cc8a30d920016e1512d9d5d14b253d1dac44dd2420"
+    },
+    {
+      "path": "paramorph/search/cpg_cs.py",
+      "original_filename": "cpg_cs.py",
+      "sha256": "4c70a19772a4178bd21b00edbf1084c168927f4d502b0325ba7add0fc80b7006"
+    },
+    {
+      "path": "paramorph/search/decision_continuation.py",
+      "original_filename": "decision_continuation.py",
+      "sha256": "f00fc926005fb972c052bf96f1d3e06449b811cb233948b66c9df689c59fba7e"
+    },
+    {
+      "path": "paramorph/search/execution_comparison.py",
+      "original_filename": "execution_comparison.py",
+      "sha256": "b8df211f1ca7cbed4c59652ff894e0a05bb6a88ec9cb5db89a3a55b858967a3e"
+    },
+    {
+      "path": "paramorph/search/execution_path_model.py",
+      "original_filename": "execution_path_model.py",
+      "sha256": "139ea5dbc44686d4ec3d87d0ff11009faab8687f1c2b5c8a70d6c509986c761a"
+    },
+    {
+      "path": "paramorph/search/execution_view.py",
+      "original_filename": "execution_view.py",
+      "sha256": "fbd406dfc342b24820f9fedd21ccd8c916dbf451647d0982ffb08ad60fd61323"
+    },
+    {
+      "path": "paramorph/search/family_state.py",
+      "original_filename": "family_state.py",
+      "sha256": "682d624717dda13cb773ee9401979bd34e792fdf91a79a898d8f00f0af636799"
+    },
+    {
+      "path": "paramorph/search/investigation_control.py",
+      "original_filename": "investigation_control.py",
+      "sha256": "49f5640ae23627f765f2390fcdc33abd776551f3be71b4e8df8d8aaafcd20c7c"
+    },
+    {
+      "path": "paramorph/search/joint_planning.py",
+      "original_filename": "joint_planning.py",
+      "sha256": "51d11f60cc7e128179e8ff6cd1de143bfea7f8b7a3840012f2fb67d1beeaa237"
+    },
+    {
+      "path": "paramorph/search/module_relations.py",
+      "original_filename": "module_relations.py",
+      "sha256": "9704cf96d11f353ff734702ecc79d148c43855695c33534e66e3aae3e183c936"
+    },
+    {
+      "path": "paramorph/search/physical_stage_master.py",
+      "original_filename": "physical_stage_master.py",
+      "sha256": "728452960a121e2392bcc245fabb2733af76f8fea7dd45f855b820e14f7d109d"
+    },
+    {
+      "path": "paramorph/search/physical_stage_search.py",
+      "original_filename": "physical_stage_search.py",
+      "sha256": "165b2a103f13155f1b1732a291a179ace0b52cc9a70309758be2977ce68bd1aa"
+    },
+    {
+      "path": "paramorph/search/planning_portfolio.py",
+      "original_filename": "planning_portfolio.py",
+      "sha256": "04f58404ab94420a4b9bc5bf3231fce48ee763e47f7f970dbea3f2a27ebd10b5"
+    },
+    {
+      "path": "paramorph/search/seed_planner.py",
+      "original_filename": "seed_planner.py",
+      "sha256": "190605ebc8294fb201ac9d8fd32cfe7a04d3d067bcbcb7db83373656330f64d2"
+    },
+    {
+      "path": "paramorph/search/strategy_evidence.py",
+      "original_filename": "strategy_evidence.py",
+      "sha256": "9353af648d60a0b14b5f31a95033794ef10ef8e52a12aa360c91650b57de5332"
+    },
+    {
+      "path": "paramorph/search/system_search.py",
+      "original_filename": "system_search.py",
+      "sha256": "52d736230a96ba40cb7bd2b59f08100600277eec9c25ead8ddadd0ba867af030"
+    },
+    {
+      "path": "paramorph/storage/experiment_store.py",
+      "original_filename": "experiment_store.py",
+      "sha256": "8fec31de8decd7781cf3ac954b51e1d70ad751ec8bafb6d48b8e5206a0749f4b"
+    },
+    {
+      "path": "paramorph/tests/test_communication_plan.py",
+      "original_filename": "test_communication_plan.py",
+      "sha256": "18e06c2b5995c16ed6736eaaee884f52e25388c137ef0792619fd2f45b0819a6"
+    },
+    {
+      "path": "paramorph/tests/test_cost_model.py",
+      "original_filename": "test_cost_model.py",
+      "sha256": "921a68236494920f6dfebd5a88091fd36df753753d3914b26bb77778ec413ad6"
+    },
+    {
+      "path": "paramorph/tests/test_end_to_end.py",
+      "original_filename": "test_end_to_end.py",
+      "sha256": "693d61a40df3c77c8da7b7df2a4ec33af92bf8ad76eb7bfb1f970346598a7a3f"
+    },
+    {
+      "path": "paramorph/tests/test_finalize_model_grads.py",
+      "original_filename": "test_finalize_model_grads.py",
+      "sha256": "6412c8239b9fae2b80fc44ab49d6ea85190bf8ab31ada7c9f1bcf235080bd2ee"
+    },
+    {
+      "path": "paramorph/tests/test_global_planning.py",
+      "original_filename": "test_global_planning.py",
+      "sha256": "45045a6f69082159d6828a15c6d74f2fed6786c205d0df3945d2b97e13f91eb1"
+    },
+    {
+      "path": "paramorph/tests/test_parameter_ledger.py",
+      "original_filename": "test_parameter_ledger.py",
+      "sha256": "9e480996848d8841418ff62dd0b1231e8a43efc29e4b819ebb603c2ab07b8020"
+    },
+    {
+      "path": "paramorph/tests/test_physical_paths.py",
+      "original_filename": "test_physical_paths.py",
+      "sha256": "3315d04e2b95730c95710f68add8fc2e231210d8c4c6cf4c8a0b9986a210787e"
+    },
+    {
+      "path": "paramorph/tests/test_search_algorithms.py",
+      "original_filename": "test_search_algorithms.py",
+      "sha256": "1f050cd891f1070be9609f692af9d59308ca56ee66d918570f99fc3ab2f6449c"
+    },
+    {
+      "path": "paramorph/tests/test_state_sharding_and_resource_replay.py",
+      "original_filename": "test_state_sharding_and_resource_replay.py",
+      "sha256": "030f9dd7fa8ab80afaecc6375a8ea54a6e9723b7d3908e583bb712b132ffc76d"
+    },
+    {
+      "path": "paramorph/tests/test_strategy_transformations.py",
+      "original_filename": "test_strategy_transformations.py",
+      "sha256": "bedcfd00b621d5b3c9bedd7df24271551cdeebc77d6054aa7dc4f4c83347f5b0"
+    },
+    {
+      "path": "paramorph/tests/verify_agent_constraint_feedback.py",
+      "original_filename": "verify_agent_constraint_feedback.py",
+      "sha256": "8bc6759aa12dbb6bf001609e84a7250c4b69383cbef8e1ded14bd5ae8a258e37"
+    },
+    {
+      "path": "paramorph/tests/verify_anchored_shared_costs.py",
+      "original_filename": "verify_anchored_shared_costs.py",
+      "sha256": "209e786cb27ad84d9cfcd4c51bef0590ac40453c029303f75d167777f73937d6"
+    },
+    {
+      "path": "paramorph/tests/verify_bottleneck_recorded_predictions.py",
+      "original_filename": "verify_bottleneck_recorded_predictions.py",
+      "sha256": "6f400ada5f5742c85c7b138c9079318e795d0e37744009775a5cdc4c715fe256"
+    },
+    {
+      "path": "paramorph/tests/verify_effective_execution.py",
+      "original_filename": "verify_effective_execution.py",
+      "sha256": "984a73b682e2b0388e223de5b8ddd32b3743252c6d968b2577ec61ea2a8a2aa6"
+    },
+    {
+      "path": "paramorph/tests/verify_fsdp_collective_payloads.py",
+      "original_filename": "verify_fsdp_collective_payloads.py",
+      "sha256": "4f8e505758adcddf9273bdc0929568294de74d3c54765da504acd310e3b2a49a"
+    },
+    {
+      "path": "paramorph/tests/verify_fsdp_memory_inventory.py",
+      "original_filename": "verify_fsdp_memory_inventory.py",
+      "sha256": "0d94f6930d1d3cea928b823ef582f50f0b5cc736d257c9e3cfc2aa6b9dfd3d4f"
+    },
+    {
+      "path": "paramorph/tests/verify_measurement_semantics.py",
+      "original_filename": "verify_measurement_semantics.py",
+      "sha256": "e9d46fc0b436ae9fc9768bb7a05dc8952bdec6b46c38a1af8ed1691ab5ec8b34"
+    },
+    {
+      "path": "paramorph/tests/verify_optimizer_graph_semantics.py",
+      "original_filename": "verify_optimizer_graph_semantics.py",
+      "sha256": "20f61d414d314c6388fbb1221e901a11ada14a2cb53a48df3c1160faec6976f5"
+    },
+    {
+      "path": "paramorph/tests/verify_optimizer_measurement_contract.py",
+      "original_filename": "verify_optimizer_measurement_contract.py",
+      "sha256": "9c2177200d9c7d2ea2590713121f5311e21ec55d4506318dbb74baa3deb6b726"
+    },
+    {
+      "path": "paramorph/tests/verify_physical_stage_master.py",
+      "original_filename": "verify_physical_stage_master.py",
+      "sha256": "0cb02a1eb71c2e9928f8485a19ff211f73c0e56cf146df782454afb17e2eefa4"
+    },
+    {
+      "path": "paramorph/tests/verify_pipeline_payload.py",
+      "original_filename": "verify_pipeline_payload.py",
+      "sha256": "d718846939936ef36a0b2b17b69d45e96b1acbc59f81c08a63463928086ca555"
+    },
+    {
+      "path": "paramorph/tests/verify_projection_cost_bindings.py",
+      "original_filename": "verify_projection_cost_bindings.py",
+      "sha256": "e0dd7b3883f2ad2505720854aeb73089e267c14f5d590fc77eb5c464bfebca11"
+    },
+    {
+      "path": "paramorph/tests/verify_state_dtype_evidence.py",
+      "original_filename": "verify_state_dtype_evidence.py",
+      "sha256": "f7e4f2b49b51a3363df5a419ee009f837bccc9ab44a4b3720cf1fb6018ba024d"
+    },
+    {
+      "path": "paramorph/trace/__init__.py",
+      "original_filename": "__init__.py",
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    {
+      "path": "paramorph/trace/dependency_graph.py",
+      "original_filename": "dependency_graph.py",
+      "sha256": "6935ba9c1a008b8c9de2e918ac25cb177a25273cdc3add8bc5ab9baaaead3d95"
+    },
+    {
+      "path": "paramorph/trace/trace_mapper.py",
+      "original_filename": "trace_mapper.py",
+      "sha256": "c1d05dab225205550522b569a4af7ff93a5c641942c38bb3cfabc9b1fbc1f6b1"
+    },
+    {
+      "path": "paramorph/trace/trace_parser.py",
+      "original_filename": "trace_parser.py",
+      "sha256": "2b963d0d8f6474e2d397b65dca36b8e2c4de61cce2ced554cbd24fbd741be877"
+    },
+    {
+      "path": "paramorph/validation/parallel_validator.py",
+      "original_filename": "parallel_validator.py",
+      "sha256": "2453f9384af2470f79b9e9075076316c3d9bb72759ba675d3f80a7c5a78b8c32"
+    },
+    {
+      "path": "integration/megatron/core/frontier/__init__.py",
+      "original_filename": "__init__.py",
+      "sha256": "8a52bbd62a6d722bdd544723be5da73f305037e7e5c780e3cbc4460889bf8797"
+    },
+    {
+      "path": "integration/megatron/core/frontier/agent/__init__.py",
+      "original_filename": "__init__.py",
+      "sha256": "40863813f2edfcddc63096b5813587d4fcd1060df9f696e13c7b9f07c50e2ca5"
+    },
+    {
+      "path": "integration/megatron/core/frontier/agent/actions.py",
+      "original_filename": "actions.py",
+      "sha256": "66c2bc8a21ac67a450c63bb5b77a7077a2604b05b143e8a6f68a2f7edd64e18c"
+    },
+    {
+      "path": "integration/megatron/core/frontier/agent/evidence.py",
+      "original_filename": "evidence.py",
+      "sha256": "eb02cb8c8655043f804b9f62857238b9875f951468ee72c1c4fda09dc774190b"
+    },
+    {
+      "path": "integration/megatron/core/frontier/agent/neighborhood.py",
+      "original_filename": "neighborhood.py",
+      "sha256": "53878e69aa13f1555e04ad75cd59179c8768522c63dd7c60b4793142e81b3602"
+    },
+    {
+      "path": "integration/megatron/core/frontier/agents/__init__.py",
+      "original_filename": "__init__.py",
+      "sha256": "da8d028a6ca5523de156108cd20f4c4a495cedf856b652169e88c2295e950063"
+    },
+    {
+      "path": "integration/megatron/core/frontier/agents/acquisition.py",
+      "original_filename": "acquisition.py",
+      "sha256": "f5ee4e5336530fd49b26264e94c56516e37e5ac23fd024a135ebba691ae1a989"
+    },
+    {
+      "path": "integration/megatron/core/frontier/agents/actions.py",
+      "original_filename": "actions.py",
+      "sha256": "eff31256e681fffbffa031f43627a528c7dcb91417f6b775c56cb0625fa7a2df"
+    },
+    {
+      "path": "integration/megatron/core/frontier/agents/base.py",
+      "original_filename": "base.py",
+      "sha256": "cedd9978ec88fe73b612059beb12e681a9862ef55c97e856451570d6f84261fa"
+    },
+    {
+      "path": "integration/megatron/core/frontier/agents/boundary_agent.py",
+      "original_filename": "boundary_agent.py",
+      "sha256": "984d5a1350c9611d91601a1adb3c817d01a6b7b8053e3e12e8585d30b66e739a"
+    },
+    {
+      "path": "integration/megatron/core/frontier/agents/coordinator.py",
+      "original_filename": "coordinator.py",
+      "sha256": "dd08db201ae622c97140f8cafa5992d2124ff4d72a101e28ddbf63bcba2d20d9"
+    },
+    {
+      "path": "integration/megatron/core/frontier/agents/coverage.py",
+      "original_filename": "coverage.py",
+      "sha256": "c3de0ae912adf8331fea2758d1e922643d073b4be7a40b7074790109d272f3dd"
+    },
+    {
+      "path": "integration/megatron/core/frontier/agents/critic_agent.py",
+      "original_filename": "critic_agent.py",
+      "sha256": "ff8fb9b82b0984cd6c6b7803a62782c730ffe2220b18fdf90c843eeee237b949"
+    },
+    {
+      "path": "integration/megatron/core/frontier/agents/direct_provider.py",
+      "original_filename": "direct_provider.py",
+      "sha256": "464e6c555519734bc8664de6171649b6d4ebb04836ba990d749d3af24c8b6cfe"
+    },
+    {
+      "path": "integration/megatron/core/frontier/agents/execution_critic.py",
+      "original_filename": "execution_critic.py",
+      "sha256": "5a02516060ca4aa690e0b17559be4e1c9cd1f9f8a2c344de3c0a1cce441d49d2"
+    },
+    {
+      "path": "integration/megatron/core/frontier/agents/history.py",
+      "original_filename": "history.py",
+      "sha256": "457e0b80bfad78e0812b22fc8eeb0bde3255ebe22bef160b0cb011e49b930c66"
+    },
+    {
+      "path": "integration/megatron/core/frontier/agents/history_filter.py",
+      "original_filename": "history_filter.py",
+      "sha256": "b152b60e182d8c493ba1701aa8465ac7514c2652c1f823cb83a106b398549dc7"
+    },
+    {
+      "path": "integration/megatron/core/frontier/agents/ledger.py",
+      "original_filename": "ledger.py",
+      "sha256": "a54fe9900a76677e594a647b906a77a213a65e1bcbebdf4a8fce40c5541803cc"
+    },
+    {
+      "path": "integration/megatron/core/frontier/agents/measured_discovery.py",
+      "original_filename": "measured_discovery.py",
+      "sha256": "41ea789da1167c3a9c32f3c75558e67521449472aa91b96d77f714f861c065d1"
+    },
+    {
+      "path": "integration/megatron/core/frontier/agents/neighborhoods.py",
+      "original_filename": "neighborhoods.py",
+      "sha256": "3feaa9a0061ac3a63f97ca2fe704221fbd2f71e8a301f1d70c9a338a89b311ec"
+    },
+    {
+      "path": "integration/megatron/core/frontier/agents/parallel_architect.py",
+      "original_filename": "parallel_architect.py",
+      "sha256": "8607e8bae2732d179d1f19948e9babfdd784855cdae8e0fa3c9b931f70d81fe3"
+    },
+    {
+      "path": "integration/megatron/core/frontier/agents/parameter_ownership.py",
+      "original_filename": "parameter_ownership.py",
+      "sha256": "c319ffc4241705517dff89ea934351f4ed5065560ecaa6f464fcd1e2e9222669"
+    },
+    {
+      "path": "integration/megatron/core/frontier/agents/pipeline_agent.py",
+      "original_filename": "pipeline_agent.py",
+      "sha256": "827a6729821ca17bf244a7a217641d82e7af8230851e97a1e6bda6d97f0d07d9"
+    },
+    {
+      "path": "integration/megatron/core/frontier/agents/pipeline_program_agent.py",
+      "original_filename": "pipeline_program_agent.py",
+      "sha256": "02dfa9ad10a215f5a4b6ad76b170a1e8596767d82af5d8ba1f94b019ff9054f0"
+    },
+    {
+      "path": "integration/megatron/core/frontier/agents/program_features.py",
+      "original_filename": "program_features.py",
+      "sha256": "19a72d8dd2fb0a716bdec9d4823e34842bcdffe2c12c8830f332f56d39c598ca"
+    },
+    {
+      "path": "integration/megatron/core/frontier/agents/provider.py",
+      "original_filename": "provider.py",
+      "sha256": "f3f258d9fa723c7f7ba5e3e7b3cdc8a660fe42b7ca3b544e6d041e0faf3b964d"
+    },
+    {
+      "path": "integration/megatron/core/frontier/agents/repair_critique.py",
+      "original_filename": "repair_critique.py",
+      "sha256": "5908b2df0d5f8640cde889926d36918aaa5d2545ea9001c6a31314d215f6dcd7"
+    },
+    {
+      "path": "integration/megatron/core/frontier/agents/residual_gp.py",
+      "original_filename": "residual_gp.py",
+      "sha256": "081e38fe0565e50dd08486e4d44b06a4616bfc008ee485e7193aa12528310430"
+    },
+    {
+      "path": "integration/megatron/core/frontier/agents/structure_agent.py",
+      "original_filename": "structure_agent.py",
+      "sha256": "7e653831be47009490e68206d66df3efd51732ad0000dd0db2f1fc3aaedb3757"
+    },
+    {
+      "path": "integration/megatron/core/frontier/boundary/__init__.py",
+      "original_filename": "__init__.py",
+      "sha256": "7408ff6d3621d46a1839b7e57b2cbb929e90fac4399507e5379b8be2c03b726b"
+    },
+    {
+      "path": "integration/megatron/core/frontier/boundary/canonical.py",
+      "original_filename": "canonical.py",
+      "sha256": "339dc12bbe094d7111aa090b3a9ddf5bf2433a8fccfeee082771072f31e3789f"
+    },
+    {
+      "path": "integration/megatron/core/frontier/boundary/composition.py",
+      "original_filename": "composition.py",
+      "sha256": "66e99711a8f711d9aef9f1c9af99d13ad2de78a33d5f592cbeb04316f732d424"
+    },
+    {
+      "path": "integration/megatron/core/frontier/boundary/cut_enumerator.py",
+      "original_filename": "cut_enumerator.py",
+      "sha256": "801d127758c1bafce0ae7e1dbdd379ccec42839e97c175d2d402b9c9948adfc0"
+    },
+    {
+      "path": "integration/megatron/core/frontier/boundary/demand.py",
+      "original_filename": "demand.py",
+      "sha256": "84b18011e03f8f4a075efb1b811f6bb71671477f7c6218e4cf821407e261fc90"
+    },
+    {
+      "path": "integration/megatron/core/frontier/boundary/mobility.py",
+      "original_filename": "mobility.py",
+      "sha256": "2ab835b07ab46830dc75fc9414b5f3eb8c35a13ea064e5291a3b3b7dbce91fc6"
+    },
+    {
+      "path": "integration/megatron/core/frontier/boundary/payload.py",
+      "original_filename": "payload.py",
+      "sha256": "1f6aa9717116e44f3bc42705e1c55c51fd12c820dbafaab34f98bc35385ffef5"
+    },
+    {
+      "path": "integration/megatron/core/frontier/boundary/resolve_template.py",
+      "original_filename": "resolve_template.py",
+      "sha256": "8bbd1f284a061a88a34e3d3b49ef7270eb91d1d959379db2a8e3b42fce250173"
+    },
+    {
+      "path": "integration/megatron/core/frontier/boundary/synthesizer.py",
+      "original_filename": "synthesizer.py",
+      "sha256": "3fa820861b046338061f86e273c60b7ae5f1e3f84b4229299cec59a3ba63184d"
+    },
+    {
+      "path": "integration/megatron/core/frontier/boundary/verifier.py",
+      "original_filename": "verifier.py",
+      "sha256": "7aedf17828b7069ebf2ed00fe6e0934f8f925d5f7655913a2f02661bc08a8114"
+    },
+    {
+      "path": "integration/megatron/core/frontier/capability/__init__.py",
+      "original_filename": "__init__.py",
+      "sha256": "ab2abd04bc562a4399bc1a758372b5cc0d8f0b499a62147bfebbd7af45af342c"
+    },
+    {
+      "path": "integration/megatron/core/frontier/capability/catalog.py",
+      "original_filename": "catalog.py",
+      "sha256": "a19f24bc81d525233d0b0e4104825350e2e00910337280c4500669049f742860"
+    },
+    {
+      "path": "integration/megatron/core/frontier/config.py",
+      "original_filename": "config.py",
+      "sha256": "09164979ab488362d24075a9bf0096e2d7b4dc34b9f4f29e54356a7378b03819"
+    },
+    {
+      "path": "integration/megatron/core/frontier/contracts.py",
+      "original_filename": "contracts.py",
+      "sha256": "ab3a414089c24e6ee070e8e236a5ebd325e1da69ae842ea2815f593a8c96d80e"
+    },
+    {
+      "path": "integration/megatron/core/frontier/global_search/__init__.py",
+      "original_filename": "__init__.py",
+      "sha256": "b0c43674dc6d97e4b75a90ff7a06799a5660469a298fb16899418900b37f6a5b"
+    },
+    {
+      "path": "integration/megatron/core/frontier/global_search/enumerator.py",
+      "original_filename": "enumerator.py",
+      "sha256": "c7442645b798124d9945feb6edbacd7eebabcf8e58cad7ace93145816ba432a5"
+    },
+    {
+      "path": "integration/megatron/core/frontier/global_search/policy.py",
+      "original_filename": "policy.py",
+      "sha256": "4f46b7a36ebdea26917a3ade90bb88b164e365830f2cf70832a7ef5dd2fc7000"
+    },
+    {
+      "path": "integration/megatron/core/frontier/hardware.py",
+      "original_filename": "hardware.py",
+      "sha256": "30e317fab9d9bdf44f69f2b4cbd60d2d3368cd208f8eb8f1770abc7a0b9ce2dd"
+    },
+    {
+      "path": "integration/megatron/core/frontier/ir/__init__.py",
+      "original_filename": "__init__.py",
+      "sha256": "d193f403bca1dbbda7f5a4592e078d132dd360cb20b46c314749626114f4f1bb"
+    },
+    {
+      "path": "integration/megatron/core/frontier/ir/boundary.py",
+      "original_filename": "boundary.py",
+      "sha256": "eb21621fc9bbfe189234b6be46a74b08465dcae3c5e9f747773d638dad54f831"
+    },
+    {
+      "path": "integration/megatron/core/frontier/ir/contract.py",
+      "original_filename": "contract.py",
+      "sha256": "dec1157770e0ba2dc9a52fc4e9c9eeef3384e5403e5c11abaf4656c3f12444d1"
+    },
+    {
+      "path": "integration/megatron/core/frontier/ir/memory.py",
+      "original_filename": "memory.py",
+      "sha256": "c0778906249688d3cc43e3b826219412025138ea3f6c3f88f29f411982bd18f2"
+    },
+    {
+      "path": "integration/megatron/core/frontier/ir/pipeline_program.py",
+      "original_filename": "pipeline_program.py",
+      "sha256": "17f7f0b3fe983b5f2ccec2ecd055dcf3d5a7aed642e527ee56e1d9883725efdf"
+    },
+    {
+      "path": "integration/megatron/core/frontier/ir/program.py",
+      "original_filename": "program.py",
+      "sha256": "db0dc11c2e389c6eece4373557730011f85afad0f93e633bfb65b733a8e24450"
+    },
+    {
+      "path": "integration/megatron/core/frontier/ir/region.py",
+      "original_filename": "region.py",
+      "sha256": "4107d62b695fc4ef2d2c4cdaff8b97527004d52bc5a3458f18d302490df2635d"
+    },
+    {
+      "path": "integration/megatron/core/frontier/lowering/__init__.py",
+      "original_filename": "__init__.py",
+      "sha256": "f03bf5b23f9ffac71f35a2ba299b55114e79817bff5ca006168edb35314b7423"
+    },
+    {
+      "path": "integration/megatron/core/frontier/lowering/base.py",
+      "original_filename": "base.py",
+      "sha256": "a175178ce79762aec38cd8624c4ccfdc1be2b03ec2c7ee9d0f3ec8ed2bfb8cb8"
+    },
+    {
+      "path": "integration/megatron/core/frontier/lowering/fused_tp_cp.py",
+      "original_filename": "fused_tp_cp.py",
+      "sha256": "b0eff527d4926fbf9416945b8d0909aefa5054b9ad73e63827e8fe094186522e"
+    },
+    {
+      "path": "integration/megatron/core/frontier/lowering/reduce_handoff.py",
+      "original_filename": "reduce_handoff.py",
+      "sha256": "2f0888a16015f10561a9c3e93e62813d1956f43e41ba425b82a290254d5e10da"
+    },
+    {
+      "path": "integration/megatron/core/frontier/lowering/standard.py",
+      "original_filename": "standard.py",
+      "sha256": "49be1742b825da3a4b687dcb61d37fc468cd9a3c99c64453bfeec0496b200884"
+    },
+    {
+      "path": "integration/megatron/core/frontier/megatron/__init__.py",
+      "original_filename": "__init__.py",
+      "sha256": "2d435750a446db1fe368bc79e99fdb40ec8228d5b306bf6ee3a94ed43e21209a"
+    },
+    {
+      "path": "integration/megatron/core/frontier/megatron/checkpoint_ownership.py",
+      "original_filename": "checkpoint_ownership.py",
+      "sha256": "a0c211a8916a0c944fc8460e889d2371fce515752bc5c85a04432fd30915f832"
+    },
+    {
+      "path": "integration/megatron/core/frontier/megatron/dense_partition.py",
+      "original_filename": "dense_partition.py",
+      "sha256": "c69511df04a8323f8ad0e6afc3092ae49de083c0becc48f5f70405036ccd126e"
+    },
+    {
+      "path": "integration/megatron/core/frontier/megatron/model_adapter.py",
+      "original_filename": "model_adapter.py",
+      "sha256": "1263c99105a539a16cc1e2ba0f66fea907ca63fdfef783d648ea8e2b1c92dcbe"
+    },
+    {
+      "path": "integration/megatron/core/frontier/megatron/moe_partition.py",
+      "original_filename": "moe_partition.py",
+      "sha256": "fc7f83c1fe2188eb08005503ecc08c1172062aace0e19346013d86addac4a939"
+    },
+    {
+      "path": "integration/megatron/core/frontier/megatron/moe_validation.py",
+      "original_filename": "moe_validation.py",
+      "sha256": "eeacfd9014f9a47c9091fad536e83d68f92f0dd8f55ac31f645adae9a900e8d9"
+    },
+    {
+      "path": "integration/megatron/core/frontier/megatron/native_checkpoint.py",
+      "original_filename": "native_checkpoint.py",
+      "sha256": "449ddd4b447ebdd9499d029710b88db69b69cf55a61635a6961bf4a20d752836"
+    },
+    {
+      "path": "integration/megatron/core/frontier/megatron/native_parameter_contracts.py",
+      "original_filename": "native_parameter_contracts.py",
+      "sha256": "6494373c8932b50fa6125dce3ee01419e8e68e6ccd1520d74f29979d35522a06"
+    },
+    {
+      "path": "integration/megatron/core/frontier/megatron/operator_adapter.py",
+      "original_filename": "operator_adapter.py",
+      "sha256": "ae55f9d11bfc4d88d22bba386974957b5db8b21fef405dde61ebb8b41c9b0909"
+    },
+    {
+      "path": "integration/megatron/core/frontier/megatron/project_partition.py",
+      "original_filename": "project_partition.py",
+      "sha256": "0143aa2c84de4cecabf690d37aa83df7dfaaf840e8017575d723097996baf8a8"
+    },
+    {
+      "path": "integration/megatron/core/frontier/megatron/state_migration.py",
+      "original_filename": "state_migration.py",
+      "sha256": "c53a6504126cce1ea0ecb6b5857cc8c1a4fbab836f41e976fbccf5c4914ae920"
+    },
+    {
+      "path": "integration/megatron/core/frontier/megatron/training_planner.py",
+      "original_filename": "training_planner.py",
+      "sha256": "1d78bdb95771a3bf8da9ac92854d9a7b0cdaaae35754c6296224f429106c6d5c"
+    },
+    {
+      "path": "integration/megatron/core/frontier/megatron_hooks.py",
+      "original_filename": "megatron_hooks.py",
+      "sha256": "b9e82dbb2f328ef6c446dcb0a1c2fe6b7bca081aba641765af27c88df338a262"
+    },
+    {
+      "path": "integration/megatron/core/frontier/memory_admission.py",
+      "original_filename": "memory_admission.py",
+      "sha256": "8536f654ede3085d5fc69b1be1cf91b1079a709bb4155a8cbbafb1d0ecf4e0e3"
+    },
+    {
+      "path": "integration/megatron/core/frontier/mobility.py",
+      "original_filename": "mobility.py",
+      "sha256": "f1044c550511e6fd316267fca5374379a7de729f7491e60a182944c7db7846d8"
+    },
+    {
+      "path": "integration/megatron/core/frontier/pipeline/__init__.py",
+      "original_filename": "__init__.py",
+      "sha256": "a8118de3746482523704c51dbb4d95c8553a1dc1dcd9598833566bdc0da03ed6"
+    },
+    {
+      "path": "integration/megatron/core/frontier/pipeline/readiness.py",
+      "original_filename": "readiness.py",
+      "sha256": "73091c3537365768b66a6f9f86d9856c53708c59bfc8d9fa5ae0e767104160ee"
+    },
+    {
+      "path": "integration/megatron/core/frontier/pipeline/scheduler.py",
+      "original_filename": "scheduler.py",
+      "sha256": "2d81b4d9f0890c5bcbd149556b7ffddddc53abdb3db855d0b7695e9dfeb058c4"
+    },
+    {
+      "path": "integration/megatron/core/frontier/pipeline/simulator.py",
+      "original_filename": "simulator.py",
+      "sha256": "b46c861ecbb0351b686892a75b473d4f3dfad60d4a3cee4fddaf94f429a7b6bb"
+    },
+    {
+      "path": "integration/megatron/core/frontier/planner/__init__.py",
+      "original_filename": "__init__.py",
+      "sha256": "021aa431297e2eb804783366dce43010dfe17f80e799dfe3e608221f5583347a"
+    },
+    {
+      "path": "integration/megatron/core/frontier/planner/beam.py",
+      "original_filename": "beam.py",
+      "sha256": "41915bc14644999ae6038435cc4d7dd56d4de4211d85c119c4aad924bbe66e65"
+    },
+    {
+      "path": "integration/megatron/core/frontier/planner/candidate.py",
+      "original_filename": "candidate.py",
+      "sha256": "5ac35df3be2905e02750ac47dff1270c2b0669af06e76389087caa59136342c0"
+    },
+    {
+      "path": "integration/megatron/core/frontier/planner/candidates.py",
+      "original_filename": "candidates.py",
+      "sha256": "01cde793f6ff3dd7b3701376952252b6450398146601d830b84daf776ae0b070"
+    },
+    {
+      "path": "integration/megatron/core/frontier/planner/compiler.py",
+      "original_filename": "compiler.py",
+      "sha256": "97278216499417275dd12eaba5b24a423f5e3993f4f3bff5c0b17ca93fcd1652"
+    },
+    {
+      "path": "integration/megatron/core/frontier/planner/dominance.py",
+      "original_filename": "dominance.py",
+      "sha256": "1c78f976c38b8c6955550c810ee6cc45a6aa80ba58bc5cd970b9f3a4692fc59a"
+    },
+    {
+      "path": "integration/megatron/core/frontier/planner/feasibility.py",
+      "original_filename": "feasibility.py",
+      "sha256": "a84bfec0d8e17f8be37d4bc5eb0d2d5b4811ad4781df308eb17b561c52aedd6c"
+    },
+    {
+      "path": "integration/megatron/core/frontier/planner/memory.py",
+      "original_filename": "memory.py",
+      "sha256": "0450c03d1a56383f64ab55f4284c5e2ec88bae0629efb80861579f3e8cc1093b"
+    },
+    {
+      "path": "integration/megatron/core/frontier/planner/native_ownership.py",
+      "original_filename": "native_ownership.py",
+      "sha256": "9f73c61e35d02348ba9d573598d54006b8decddf068f2d8e88473644cc13c618"
+    },
+    {
+      "path": "integration/megatron/core/frontier/planner/obligations.py",
+      "original_filename": "obligations.py",
+      "sha256": "20a539cfa513df6a4f650f4ace91766bfb3fe3f1ddf3cbdf4ff1a1a41dfb2dfc"
+    },
+    {
+      "path": "integration/megatron/core/frontier/planner/repair.py",
+      "original_filename": "repair.py",
+      "sha256": "2117c950e5797fb99c6ed71557fd60cb8b6e0df61fc347cc22eb83a975a4150c"
+    },
+    {
+      "path": "integration/megatron/core/frontier/planner/search.py",
+      "original_filename": "search.py",
+      "sha256": "ea6f9bb4126f710505256d44818966ba5bdb0d5fcd7befc4b6199f22a07dbd7d"
+    },
+    {
+      "path": "integration/megatron/core/frontier/planner/segment.py",
+      "original_filename": "segment.py",
+      "sha256": "3cebf0f1ab522cc808a7a49196cea8c756c9156a5daa4dd917c3c8e23e785601"
+    },
+    {
+      "path": "integration/megatron/core/frontier/planner/simulator.py",
+      "original_filename": "simulator.py",
+      "sha256": "d8aeec7d741427803882461de7013275cc595844bc066a81fc865247b2af2bbc"
+    },
+    {
+      "path": "integration/megatron/core/frontier/planner/temporal.py",
+      "original_filename": "temporal.py",
+      "sha256": "20af63712898cca65e3ff9b43414453f0bce82c2ebf721539348033a84582dcf"
+    },
+    {
+      "path": "integration/megatron/core/frontier/planner/transformations.py",
+      "original_filename": "transformations.py",
+      "sha256": "33718353055892f9ddaa10545cdc32a5778256371c8bc610781a1dc50a5f23f3"
+    },
+    {
+      "path": "integration/megatron/core/frontier/planner/verifier.py",
+      "original_filename": "verifier.py",
+      "sha256": "9aca9181245b71b4333f04ce06cf5f044d13633153cc6688b02de9f19681e194"
+    },
+    {
+      "path": "integration/megatron/core/frontier/profile/__init__.py",
+      "original_filename": "__init__.py",
+      "sha256": "bee22d838797bb80c2d1fc3ac2181406cc406ddd05ce6e4b52a304da8d5dca59"
+    },
+    {
+      "path": "integration/megatron/core/frontier/profile/interference.py",
+      "original_filename": "interference.py",
+      "sha256": "d1cc572926473b0fc8a0eba120413426f6c9a29b5e3bc1e962fb62034e54811e"
+    },
+    {
+      "path": "integration/megatron/core/frontier/profiling/__init__.py",
+      "original_filename": "__init__.py",
+      "sha256": "6e1d61ac3ef51f046cd351dfcf5e50cebd1d6c6496663b8358ba3b481bfce6ec"
+    },
+    {
+      "path": "integration/megatron/core/frontier/profiling/contention_profiler.py",
+      "original_filename": "contention_profiler.py",
+      "sha256": "98584ea3f4c9a8a29cf046a6362fd2ffe455cc899638f1444ae29654227561a6"
+    },
+    {
+      "path": "integration/megatron/core/frontier/profiling/database.py",
+      "original_filename": "database.py",
+      "sha256": "d0f6781ef86a4567d771f79dc0655df2c81c490fe3e5bbea095c1857ea1f7b39"
+    },
+    {
+      "path": "integration/megatron/core/frontier/profiling/region_profiler.py",
+      "original_filename": "region_profiler.py",
+      "sha256": "990932022182515bbfa2548f03937c8f257b82792cf416da04530ab4c782700a"
+    },
+    {
+      "path": "integration/megatron/core/frontier/profiling/transition_profiler.py",
+      "original_filename": "transition_profiler.py",
+      "sha256": "6a8bf62a7c364378cb2e27362340e383b54a43441c48016c63904a556cc42fb9"
+    },
+    {
+      "path": "integration/megatron/core/frontier/runtime/__init__.py",
+      "original_filename": "__init__.py",
+      "sha256": "1eaf5a9ab2a7e9ae0c2226c5a0b219b832c2d60b03227d44f5cc957ac1f6bb37"
+    },
+    {
+      "path": "integration/megatron/core/frontier/runtime/boundary.py",
+      "original_filename": "boundary.py",
+      "sha256": "b89d71f9ffe97f6d187e7511745d21560f394e38811637d59a222d5860f93cbe"
+    },
+    {
+      "path": "integration/megatron/core/frontier/runtime/buffer_pool.py",
+      "original_filename": "buffer_pool.py",
+      "sha256": "130ae06d31aa9c59fcc5e7efd62b28857e47c1f06768784cbc7390feee253f61"
+    },
+    {
+      "path": "integration/megatron/core/frontier/runtime/compiler.py",
+      "original_filename": "compiler.py",
+      "sha256": "b229c253732ffec6ee1cea71f27dddecd981945f7bc5d803b2af815191d0eeb1"
+    },
+    {
+      "path": "integration/megatron/core/frontier/runtime/cuda_ring_reduce.py",
+      "original_filename": "cuda_ring_reduce.py",
+      "sha256": "007fcb01434f0f4f9109218fc2dbfca8eab833398d8af0ffad2bc12cf54a3684"
+    },
+    {
+      "path": "integration/megatron/core/frontier/runtime/megatron_p2p.py",
+      "original_filename": "megatron_p2p.py",
+      "sha256": "19d99b49458ffc763465f28009e0c37ad8acf434d89155ac5da4681814d2615e"
+    },
+    {
+      "path": "integration/megatron/core/frontier/runtime/moe_compose_p2p.py",
+      "original_filename": "moe_compose_p2p.py",
+      "sha256": "e81d36aa0c488d3b5d988bc39aa6530a68e12ebe4c45f850707f6624a368893b"
+    },
+    {
+      "path": "integration/megatron/core/frontier/runtime/moe_compose_payload.py",
+      "original_filename": "moe_compose_payload.py",
+      "sha256": "a1d889469b232e30ad2aca0db1aa1787236ade481b48ce1b8a7d263e85ab5052"
+    },
+    {
+      "path": "integration/megatron/core/frontier/runtime/moe_payload.py",
+      "original_filename": "moe_payload.py",
+      "sha256": "bb7891a3821a9792d85b26b37243a1bc693d85ae88158f5bc9af869804c00e5b"
+    },
+    {
+      "path": "integration/megatron/core/frontier/runtime/pipeline_boundary.py",
+      "original_filename": "pipeline_boundary.py",
+      "sha256": "b6d985bdae0a2b582f4cd9eb662e8f9cb849c199a3e7942797a67a346e092335"
+    },
+    {
+      "path": "integration/megatron/core/frontier/runtime/projected_p2p.py",
+      "original_filename": "projected_p2p.py",
+      "sha256": "e33d6c137b7e401a4197f570a2abe4e86aff78c829a231d077b9d495f3f6d8bd"
+    },
+    {
+      "path": "integration/megatron/core/frontier/runtime/projected_payload.py",
+      "original_filename": "projected_payload.py",
+      "sha256": "a51f1f4834ecb1db7e5766b2ef370a7aa9a495b0ac6bc82f44c7d9f9fa74114c"
+    },
+    {
+      "path": "integration/megatron/core/frontier/runtime/repair.py",
+      "original_filename": "repair.py",
+      "sha256": "30e499c48b9beac5c34ee3566feed325992fbddfdf4a7e939f08af6ca80f913e"
+    },
+    {
+      "path": "integration/megatron/core/frontier/runtime/resolve.py",
+      "original_filename": "resolve.py",
+      "sha256": "14ee122b5c30e3cbc0109cbd3d6b914123d352b7d04456fe29a62904b5bacf50"
+    },
+    {
+      "path": "integration/megatron/core/frontier/runtime/resolve_handoff.py",
+      "original_filename": "resolve_handoff.py",
+      "sha256": "73da4f05d39c85ed2ba350c9e0db26d74247550dfffc0ff7ec0b2eac1b9c6b8a"
+    },
+    {
+      "path": "integration/megatron/core/frontier/runtime/schedule_plan.py",
+      "original_filename": "schedule_plan.py",
+      "sha256": "1ab6cadf1a8a9f71cfe1889de8ab0a55710737482eb7f61192c6dcb56f0e0b6a"
+    },
+    {
+      "path": "integration/megatron/core/frontier/runtime/trace.py",
+      "original_filename": "trace.py",
+      "sha256": "9356da78e4c10b8d0c267c913c7317f8304d1e9fde15dffbd60cade6c08f1c82"
+    },
+    {
+      "path": "integration/megatron/core/frontier/runtime/typed_p2p.py",
+      "original_filename": "typed_p2p.py",
+      "sha256": "96525a90bcc9578a21c840d48649e9b32e3605808bc0954ea5faf08e3a9ea4e6"
+    },
+    {
+      "path": "integration/megatron/core/frontier/simulator/__init__.py",
+      "original_filename": "__init__.py",
+      "sha256": "d85082b72b98dc509d68570a6a67d7d5b243b85fce19859fee725e579deefd64"
+    },
+    {
+      "path": "integration/megatron/core/frontier/simulator/event.py",
+      "original_filename": "event.py",
+      "sha256": "2833b096a00f5df66ac28f5ff38a14a35c160a40b5d162bcc701fbae39afe5ab"
+    },
+    {
+      "path": "integration/megatron/core/frontier/simulator/memory.py",
+      "original_filename": "memory.py",
+      "sha256": "62e70f78c7e77f8d558ea07b10933856dc6116c600ded2623b439e1d6bd673bc"
+    },
+    {
+      "path": "integration/megatron/core/frontier/simulator/pipeline.py",
+      "original_filename": "pipeline.py",
+      "sha256": "62acd354188f229d3e3aeca5fe8d14701024dcfa3a6097bd6c343d35e8a753a7"
+    },
+    {
+      "path": "integration/megatron/core/frontier/simulator/resources.py",
+      "original_filename": "resources.py",
+      "sha256": "c3d32abb7b773de21950bbddcd996443c4adbdc3d75825856550e55ccce11c26"
+    },
+    {
+      "path": "integration/megatron/core/frontier/state.py",
+      "original_filename": "state.py",
+      "sha256": "f25ab179ec81f7a68038dc335269cf54b4b2f7cc3eac80067ae5decc91903a86"
+    },
+    {
+      "path": "integration/megatron/core/frontier/transition.py",
+      "original_filename": "transition.py",
+      "sha256": "dbcdc1e064d5f56f3c5da6d1ad4af6f5fc14ac2a48c9e9d7ebbdc3497357b37b"
+    },
+    {
+      "path": "canonical_region_train.py",
+      "original_filename": "canonical_region_train.py",
+      "sha256": "24b8d4b9ed6c40f23a712acbaa9934bc097bdb13a3cb8bca1bb83f9567b8c165"
+    },
+    {
+      "path": "dense_program_train.py",
+      "original_filename": "dense_program_train.py",
+      "sha256": "994bfb666ebd9cacba88e045dcc1f500c43b30570521120d5f91197725bf70eb"
+    },
+    {
+      "path": "frontier_falcon_cut.py",
+      "original_filename": "frontier_falcon_cut.py",
+      "sha256": "4fce68254cbc85d96512b532887f2e95f5831b89aa0b4769cccec23b045e77f2"
+    },
+    {
+      "path": "frontier_hybrid_provider.py",
+      "original_filename": "frontier_hybrid_provider.py",
+      "sha256": "6c9f192590e5c0e4b7e4296aa3501ae86a851045c6dcc349c3b5ea9d5644e84e"
+    },
+    {
+      "path": "frontier_hybrid_router.py",
+      "original_filename": "frontier_hybrid_router.py",
+      "sha256": "304517a354c5c989e5ef2155731b19e5f7141a3538ec456ab4e49f0b1991235c"
+    },
+    {
+      "path": "global_program_train.py",
+      "original_filename": "global_program_train.py",
+      "sha256": "00a1955f70137cc92d5efb767c46ba7337c84448a494fa4d05ee82abe9023f3c"
+    },
+    {
+      "path": "hybrid_training_entry.py",
+      "original_filename": "hybrid_training_entry.py",
+      "sha256": "9cf4f8a40910c4bc68a91ea2a50a844cd79c465b17acd8629ef104f4c423f0b2"
+    },
+    {
+      "path": "moe_region_train.py",
+      "original_filename": "moe_region_train.py",
+      "sha256": "81414a195605b680a8a6ba3064047cbbc43894af9c4e9e0003f0ff1881541ede"
+    },
+    {
+      "path": "pipeline_train.py",
+      "original_filename": "pipeline_train.py",
+      "sha256": "b230c91ecb3ec7c6e825de22769c0751aa5cb1074e26430e1c231c31d2af6fe7"
+    },
+    {
+      "path": "project_region_train.py",
+      "original_filename": "project_region_train.py",
+      "sha256": "da9e901205a61d8e95a634640cc55301e99fa701058ab4d1facbb0bf0d86e711"
+    },
+    {
+      "path": "region_train.py",
+      "original_filename": "region_train.py",
+      "sha256": "5b1c105983f3334f9b0e12f841b9936e2b48afdaad52d31ba18e58cae475996b"
+    },
+    {
+      "path": "integration/LICENSE.Megatron-LM",
+      "original_filename": "LICENSE",
+      "sha256": "9d70d3ebc699d4c78ebe3f78dfb94b6dbae3529aea3dbc912e65e34a9f17667e"
+    },
+    {
+      "path": "paper/ParaMeld-Chinese.pdf",
+      "original_filename": "ParaMeld-Chinese.pdf",
+      "sha256": "2eceeaeb75e7526a2affc14ef03e32802d5d791170ad3593739444a3cd249682"
+    },
+    {
+      "path": "paper/ParaMeld-Chinese-Supplement.pdf",
+      "original_filename": "ParaMeld-Chinese-Supplement.pdf",
+      "sha256": "95e27aab07574429ea55f23255581239853a03748f171d8397c428c6c22e83a1"
+    },
+    {
+      "path": "paper/ParaMeld-Chinese-source.zip",
+      "original_filename": "ParaMeld-Chinese-source.zip",
+      "sha256": "dd1698163d54a91bf599f890280dd70f07af80b78a73604bb986296536e585af"
+    }
+  ]
+}

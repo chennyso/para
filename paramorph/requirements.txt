@@ -1,0 +1,9 @@
+httpx[socks]>=0.28,<1
+matplotlib
+numpy
+networkx>=3
+openai
+ortools
+pydantic>=2
+scipy
+tiktoken
