@@ -8,6 +8,7 @@ on:
     paths:
       - paramorph/search/family_state.py
       - paramorph/tests/test_family_ledger_evidence.py
+      - paramorph/tests/test_family_ledger_profile_gap.py
       - .github/workflows/parameld-evidence.yml
   workflow_dispatch:
 
@@ -29,4 +30,4 @@ jobs:
       - name: Run candidate evidence regression tests
         env:
           PYTHONPATH: paramorph
-        run: python -m unittest discover -s paramorph/tests -p test_family_ledger_evidence.py -v
+        run: python -m unittest discover -s paramorph/tests -p 'test_family_ledger_*.py' -v
