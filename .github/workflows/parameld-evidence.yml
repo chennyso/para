@@ -1,0 +1,50 @@
+name: ParaMeld evidence regression
+
+on:
+  push:
+    branches:
+      - fix/parameld-measurement-evidence-20261105
+  pull_request:
+    paths:
+      - paramorph/search/family_state.py
+      - paramorph/cost/decomposition.py
+      - paramorph/predictor/graph_delta.py
+      - paramorph/tests/test_family_ledger_evidence.py
+      - paramorph/tests/test_family_ledger_profile_gap.py
+      - paramorph/tests/test_cost_reuse_paths.py
+      - paramorph/tests/test_graph_delta_evidence.py
+      - .github/workflows/parameld-evidence.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ledger-evidence:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: paramorph/requirements.txt
+      - name: Install actual project dependencies
+        run: python -m pip install -r paramorph/requirements.txt
+      - name: Run evidence and cost validity tests
+        env:
+          PYTHONPATH: paramorph:integration
+        run: |
+          python -m unittest discover -s paramorph/tests -p 'test_family_ledger_*.py' -v
+          python -m unittest discover -s paramorph/tests -p 'test_cost_reuse_paths.py' -v
+          python -m unittest discover -s paramorph/tests -p 'test_graph_delta_evidence.py' -v
+      - name: Run search and strategy tests
+        env:
+          PYTHONPATH: paramorph:integration
+        run: |
+          python -m unittest discover -s paramorph/tests -p 'test_search_algorithms.py' -v
+          python -m unittest discover -s paramorph/tests -p 'test_strategy_transformations.py' -v
+      - name: Run global planning validation tests
+        env:
+          PYTHONPATH: paramorph:integration
+        run: python -m unittest discover -s paramorph/tests -p 'test_global_planning.py' -v

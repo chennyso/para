@@ -3,7 +3,6 @@ import json
 import math
 
 from .profile_database import signature
-
 from cost.decomposition import assess_reuse
 
 
@@ -20,19 +19,22 @@ def profile_key(profile, operation, rank, vp, layer_ids):
 def graph_delta(parent, candidate):
     execution_equal = signature(parent) == signature(candidate)
     if not execution_equal:
-        # 执行配置不同：判断逐层与链路原子成本是否仍可复用。
-        # 只改执行组织（PP/VPP/Region/DP 分组）时可复用，只需重建 schedule；
-        # 改了计算形状（TP/CP/EP/MBS/recompute/形状）时原子成本变化，不可复用。
-        assessment = assess_reuse(parent, candidate) if assess_reuse is not None else None
-        reuse = bool(assessment and assessment.reuse_layer_costs
-                     and not assessment.requires_new_profiling)
-        return dict(reusable_template=reuse,
+        assessment = assess_reuse(parent, candidate)
+        reuse = assessment.reuse_layer_costs and not assessment.requires_new_profiling
+        return dict(
+            reusable_template=reuse,
             reuse_scope='atomic_layer_and_link_costs' if reuse else 'none',
-            requires_new_profiling=bool(assessment.requires_new_profiling) if assessment else True,
-            reuse_assessment=assessment.as_dict() if assessment is not None else None,
-            changed_execution_fields=[key for key in set(parent) | set(candidate)
-                                      if parent.get(key) != candidate.get(key)],
-            changed_regions=None)
+            reuse_layer_costs=assessment.reuse_layer_costs,
+            reuse_link_costs=assessment.reuse_link_costs,
+            reuse_schedule=not assessment.rebuild_schedule,
+            rebuild_schedule=assessment.rebuild_schedule,
+            requires_new_profiling=assessment.requires_new_profiling,
+            reuse_assessment=assessment.as_dict(),
+            changed_execution_fields=sorted(key for key in set(parent) | set(candidate)
+                if parent.get(key) != candidate.get(key)),
+            changed_regions=None,
+            evidence_scope='structural_cost_reuse_classification_requires_matching_real_measurement_conditions',
+        )
     previous, current = [], []
     offset = 0
     for count in parent['decoder_chunks']:
@@ -45,11 +47,22 @@ def graph_delta(parent, candidate):
     if len(previous) != len(current) or sum(parent['decoder_chunks']) != sum(candidate['decoder_chunks']):
         raise ValueError('相同执行模板需要完整且一致的模型层集合')
     changed = [index for index, (left, right) in enumerate(zip(previous, current)) if left != right]
-    return dict(reusable_template=True, reuse_scope='identical_execution',
-        requires_new_profiling=False, reuse_assessment=None, changed_regions=changed,
+    return dict(
+        reusable_template=True,
+        reuse_scope='identical_execution',
+        reuse_layer_costs=True,
+        reuse_link_costs=True,
+        reuse_schedule=not bool(changed),
+        rebuild_schedule=bool(changed),
+        requires_new_profiling=False,
+        reuse_assessment=None,
+        changed_execution_fields=['decoder_chunks'] if changed else [],
+        changed_regions=changed,
         reused_regions=[index for index in range(len(previous)) if index not in changed],
         changes=[dict(region=index, previous_layers=previous[index], candidate_layers=current[index])
-                 for index in changed])
+                 for index in changed],
+        evidence_scope='same_execution_signature_atomic_cost_reuse_only',
+    )
 
 
 def anchor_score(parent, candidate, target, baseline_throughput, measured_throughput,

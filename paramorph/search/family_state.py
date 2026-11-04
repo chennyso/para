@@ -24,11 +24,23 @@ class FamilyLedger:
         self.connection = store.connection
         self.connection.execute('CREATE TABLE IF NOT EXISTS parallel_families '
             '(id TEXT PRIMARY KEY, document TEXT NOT NULL)')
+        self.connection.execute('CREATE TABLE IF NOT EXISTS parallel_family_observations '
+            '(id TEXT PRIMARY KEY, family_id TEXT NOT NULL, trial_id TEXT NOT NULL, '
+            'document TEXT NOT NULL)')
         self.connection.commit()
 
     def records(self):
         return [json.loads(row[0]) for row in self.connection.execute(
             'SELECT document FROM parallel_families ORDER BY id')]
+
+    def observations(self, request=None):
+        if request is None:
+            rows = self.connection.execute('SELECT document FROM parallel_family_observations ORDER BY rowid')
+        else:
+            rows = self.connection.execute(
+                'SELECT document FROM parallel_family_observations WHERE family_id=? ORDER BY rowid',
+                (global_identity(request),))
+        return [json.loads(row[0]) for row in rows]
 
     def get(self, request):
         identifier = global_identity(request)
@@ -74,7 +86,7 @@ class FamilyLedger:
             document['pending_cost_keys'] = sorted(set(document['pending_cost_keys']) | pending)
         if result['status'] == 'FEASIBLE':
             document['status'] = 'FEASIBLE'
-        # 局部意图的不可行证明不能排除整个 H 家族。
+        # 局部意图的不可行证明不能排除整个家族。
         if (result['status'] == 'INFEASIBLE' and result['search_complete']
                 and result.get('scope') == 'all_family_completions'
                 and not result.get('fixed_values') and not result.get('allowed_ranges')
@@ -110,17 +122,39 @@ class FamilyLedger:
         value = performance.get('step_time_ms')
         if value is not None and (not math.isfinite(value) or value <= 0):
             raise ValueError('候选预测耗时必须为有限正数')
-        passed = bool(measurement and measurement.get('status') == 'PASS'
-            and measurement.get('performance_eligible', False))
+
+        prediction_status = (prediction or {}).get('prediction_status')
+        missing_cost_keys = sorted({row['cost_key'] for row in
+            (prediction or {}).get('evidence', {}).get('profiling_requests', [])
+            if row.get('cost_key')})
+        status = (measurement or {}).get('status')
+        failure = trial.get('failure') or {}
+        failure_status = failure.get('status')
+        observed_oom = any('OOM' in value for value in (status, failure_status)
+            if isinstance(value, str))
+        ineligible_success = status == 'PASS' and measurement.get('performance_eligible') is not True
+        excluded_from_prediction = observed_oom or ineligible_success
+        passed = status == 'PASS' and measurement.get('performance_eligible') is True
+        if passed and (not math.isfinite(measurement['step_seconds'])
+                or measurement['step_seconds'] <= 0
+                or not math.isfinite(measurement['tokens_per_second'])
+                or measurement['tokens_per_second'] <= 0):
+            raise ValueError('真实性能记录需要有限正数')
+
+        normalized = normalized_execution(request)
         entry = dict(trial_id=trial['trial_id'], plan_hash=plan_signature(request),
             state=trial['state'], prediction_id=(prediction or {}).get('prediction_id'),
+            prediction_status=prediction_status, missing_cost_keys=missing_cost_keys,
             predicted_step_ms=value, memory_admission=memory.get('admission'),
             cost_revision=(prediction or {}).get('cost_database_revision'), measured_pass=passed,
+            measurement_status=status, measurement_run_id=(measurement or {}).get('run_id'),
+            failure_status=failure_status, failure_witness_id=failure.get('witness_id'),
+            observed_oom=observed_oom, excluded_from_prediction=excluded_from_prediction,
             measured_step_ms=measurement['step_seconds'] * 1000 if passed else None,
             measured_tokens_per_s=measurement['tokens_per_second'] if passed else None,
             layout={key: request.get(key) for key in ('vpp', 'micro_batch', 'decoder_chunks',
                 'recompute', 'pipeline_schedule', 'overlap_p2p')},
-            state_sharding={key: normalized_execution(request)[key] for key in (
+            state_sharding={key: normalized[key] for key in (
                 'execution_backend', 'optimizer_sharding', 'dense_sharding_strategy',
                 'expert_sharding_strategy', 'dp_inner_size', 'dp_outer_size',
                 'expert_dp_inner_size', 'expert_dp_outer_size')})
@@ -128,6 +162,8 @@ class FamilyLedger:
         document['candidate_ids'] = sorted(document['candidates'])
         current = [row for row in document['candidates'].values()
             if row['cost_revision'] == cost_revision and row['predicted_step_ms'] is not None
+            and row.get('prediction_status') != 'NEEDS_PROFILE'
+            and not row.get('excluded_from_prediction', False)
             and row['memory_admission'] in ('ADMIT', 'ADMIT_ANALYTICAL', 'ADMIT_CALIBRATED',
                 'WITHIN_ESTIMATED_CAPACITY')]
         measured = [row for row in document['candidates'].values() if row['measured_pass']]
@@ -138,6 +174,21 @@ class FamilyLedger:
         if current or measured:
             document['status'] = 'FEASIBLE'
         document['cost_revision'] = cost_revision
+
+        observation = dict(family_id=document['family_id'], trial_id=trial['trial_id'],
+            state=trial['state'], prediction_id=entry['prediction_id'],
+            prediction_status=prediction_status, missing_cost_keys=missing_cost_keys,
+            cost_revision=entry['cost_revision'], measurement_status=status,
+            measurement_run_id=entry['measurement_run_id'], measured_pass=passed,
+            failure_status=failure_status, failure_witness_id=entry['failure_witness_id'],
+            observed_oom=observed_oom, excluded_from_prediction=excluded_from_prediction)
+        identity = fingerprint(observation)
+        self.connection.execute('INSERT OR IGNORE INTO parallel_family_observations '
+            '(id, family_id, trial_id, document) VALUES (?, ?, ?, ?)',
+            (identity, document['family_id'], trial['trial_id'],
+                json.dumps(dict(observation, observation_id=identity,
+                    recorded_at=datetime.now(timezone.utc).isoformat()),
+                    sort_keys=True, allow_nan=False)))
         return self.save(document)
 
     def invalidate_costs(self, cost_revision):
