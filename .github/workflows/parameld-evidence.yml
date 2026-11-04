@@ -35,10 +35,13 @@ jobs:
         run: |
           python -m unittest discover -s paramorph/tests -p 'test_family_ledger_*.py' -v
           python -m unittest discover -s paramorph/tests -p 'test_cost_reuse_paths.py' -v
-      - name: Run integrated search and strategy tests
+      - name: Run search and strategy tests
         env:
           PYTHONPATH: paramorph:integration
         run: |
           python -m unittest discover -s paramorph/tests -p 'test_search_algorithms.py' -v
-          python -m unittest discover -s paramorph/tests -p 'test_global_planning.py' -v
           python -m unittest discover -s paramorph/tests -p 'test_strategy_transformations.py' -v
+      - name: Run global planning validation tests
+        env:
+          PYTHONPATH: paramorph:integration
+        run: python -m unittest discover -s paramorph/tests -p 'test_global_planning.py' -v
