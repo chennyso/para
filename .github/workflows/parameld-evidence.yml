@@ -31,13 +31,13 @@ jobs:
         run: python -m pip install -r paramorph/requirements.txt
       - name: Run cost and candidate evidence tests
         env:
-          PYTHONPATH: paramorph
+          PYTHONPATH: paramorph:integration
         run: |
           python -m unittest discover -s paramorph/tests -p 'test_family_ledger_*.py' -v
           python -m unittest discover -s paramorph/tests -p 'test_cost_reuse_paths.py' -v
       - name: Run integrated search and strategy tests
         env:
-          PYTHONPATH: paramorph
+          PYTHONPATH: paramorph:integration
         run: |
           python -m unittest discover -s paramorph/tests -p 'test_search_algorithms.py' -v
           python -m unittest discover -s paramorph/tests -p 'test_global_planning.py' -v
