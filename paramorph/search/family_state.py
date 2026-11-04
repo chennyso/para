@@ -123,6 +123,10 @@ class FamilyLedger:
         if value is not None and (not math.isfinite(value) or value <= 0):
             raise ValueError('候选预测耗时必须为有限正数')
 
+        prediction_status = (prediction or {}).get('prediction_status')
+        missing_cost_keys = sorted({row['cost_key'] for row in
+            (prediction or {}).get('evidence', {}).get('profiling_requests', [])
+            if row.get('cost_key')})
         status = (measurement or {}).get('status')
         failure = trial.get('failure') or {}
         failure_status = failure.get('status')
@@ -140,7 +144,7 @@ class FamilyLedger:
         normalized = normalized_execution(request)
         entry = dict(trial_id=trial['trial_id'], plan_hash=plan_signature(request),
             state=trial['state'], prediction_id=(prediction or {}).get('prediction_id'),
-            prediction_status=(prediction or {}).get('prediction_status'),
+            prediction_status=prediction_status, missing_cost_keys=missing_cost_keys,
             predicted_step_ms=value, memory_admission=memory.get('admission'),
             cost_revision=(prediction or {}).get('cost_database_revision'), measured_pass=passed,
             measurement_status=status, measurement_run_id=(measurement or {}).get('run_id'),
@@ -158,6 +162,7 @@ class FamilyLedger:
         document['candidate_ids'] = sorted(document['candidates'])
         current = [row for row in document['candidates'].values()
             if row['cost_revision'] == cost_revision and row['predicted_step_ms'] is not None
+            and row.get('prediction_status') != 'NEEDS_PROFILE'
             and not row.get('excluded_from_prediction', False)
             and row['memory_admission'] in ('ADMIT', 'ADMIT_ANALYTICAL', 'ADMIT_CALIBRATED',
                 'WITHIN_ESTIMATED_CAPACITY')]
@@ -172,7 +177,7 @@ class FamilyLedger:
 
         observation = dict(family_id=document['family_id'], trial_id=trial['trial_id'],
             state=trial['state'], prediction_id=entry['prediction_id'],
-            prediction_status=entry['prediction_status'],
+            prediction_status=prediction_status, missing_cost_keys=missing_cost_keys,
             cost_revision=entry['cost_revision'], measurement_status=status,
             measurement_run_id=entry['measurement_run_id'], measured_pass=passed,
             failure_status=failure_status, failure_witness_id=entry['failure_witness_id'],
