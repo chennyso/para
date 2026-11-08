@@ -19,7 +19,7 @@ GRAPH_FIELDS = frozenset({
     'execution_view', 'execution_structure',
     'diagnostic_evidence',
     'execution_analysis', 'candidate_execution_analysis',
-    'dag_index', 'model_graph', 'training_graph', 'execution_graph', 'graph_delta',
+    'dag_index', 'model_graph', 'training_graph', 'execution_graph', 'graph_delta', 'native_pipeline_delta',
     'critical_path', 'critical_path_graph', 'critical_tasks', 'critical_regions',
     'critical_path_tasks', 'affected_tasks', 'affected_regions', 'target_regions',
     'target_task_ids', 'target_flow_ids', 'affected_tasks', 'affected_task_ids', 'changed_target_ids',
@@ -55,13 +55,14 @@ class AblationEvidencePolicy:
         self.mode = mode
         self.current_ids = frozenset(current_ids)
         self.historical_ids = frozenset(historical_ids) - self.current_ids
-        self.without_graph = mode == 'without_dag_evidence'
+        self.without_graph = mode in ('without_dag_evidence', 'without_dag_model')
         self.without_memory = mode == 'without_search_memory'
 
     @property
     def contract(self):
         return dict(mode=self.mode, version='agent_evidence_visibility_v2_execution_view',
-            graph_evaluator='unchanged', native_constraints='unchanged',
+            graph_evaluator='aggregate_stage_model' if self.mode == 'without_dag_model' else 'unchanged',
+            native_constraints='unchanged',
             candidate_space='unchanged', scalar_scores='available')
 
     def withheld(self, tool):

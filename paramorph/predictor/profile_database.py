@@ -28,7 +28,7 @@ EXECUTION_FIELDS += ('execution_backend', 'fsdp_sharding_strategy', 'dense_shard
     'fsdp_bucket_elements', 'checkpoint_format', 'checkpoint_reshard', 'optimizer_checkpoint_mode')
 EXECUTION_FIELDS += ('pipeline_dtype', 'sequence_parallel', 'clip_grad')
 EXECUTION_FIELDS += ('main_grads_dtype', 'main_params_dtype', 'exp_avg_dtype', 'exp_avg_sq_dtype')
-PROFILE_SIGNATURE_REVISION = 'native_backend_execution_defaults_v4'
+PROFILE_SIGNATURE_REVISION = 'native_backend_effective_execution_v5'
 
 
 def resolved_cuda_connections(request):
@@ -128,8 +128,19 @@ def normalized_execution(request):
     return resolved
 
 
+def effective_execution_config(request):
+    from scheduling.native_microbatches import native_schedule_settings
+
+    effective = normalized_execution(request)
+    schedule = native_schedule_settings(request)
+    for key in ('group', 'overlap_p2p', 'batch_p2p_comm', 'overlap_p2p_comm_warmup_flush'):
+        effective[key] = schedule[key]
+    effective['recompute_num_layers'] = request.get('recompute_num_layers') if request['recompute'] == 'full' else None
+    return effective
+
+
 def signature(request):
-    return hashlib.sha256(json.dumps(normalized_execution(request),
+    return hashlib.sha256(json.dumps(effective_execution_config(request),
         sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
@@ -139,7 +150,7 @@ def plan_signature(request):
 
 
 def same_training_plan(first, second):
-    left, right = normalized_execution(first), normalized_execution(second)
+    left, right = effective_execution_config(first), effective_execution_config(second)
     # 发现阶段的身份字段独立核验，不能使同一训练配置绕过测量排除。
     for field in ('backend_fingerprint', 'hardware_fingerprint'):
         left.pop(field)

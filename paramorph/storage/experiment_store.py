@@ -48,6 +48,9 @@ class ExperimentStore:
             CREATE TABLE IF NOT EXISTS actual_cost_checkpoints (
                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                 kind TEXT NOT NULL, identifier TEXT NOT NULL, document TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS gpu_execution_reservations (
+                id TEXT PRIMARY KEY, run_id TEXT NOT NULL, category TEXT NOT NULL,
+                hours REAL NOT NULL, active INTEGER NOT NULL);
         ''')
         self.connection.commit()
 
@@ -60,7 +63,7 @@ class ExperimentStore:
                         'PLANNING_GPU_SELECTION', 'PLANNING_TRAINING_FEEDBACK',
                         'MEASURED_PARENT_COST_CALIBRATION', 'TRAINING_MEMORY_REJECTED',
                         'CAPACITY_VALIDATION_BEFORE_BENCHMARK',
-                        'COST_REQUEST_DEFERRED_BEFORE_GPU_START'):
+                        'COST_REQUEST_DEFERRED_BEFORE_GPU_START', 'GPU_EXECUTION_RECEIPT'):
             raise ValueError('Search State Repository记录类型未注册')
         encoded = json.dumps(document, sort_keys=True, allow_nan=False)
         identifier = fingerprint(dict(kind=kind, document=document))
@@ -151,6 +154,53 @@ class ExperimentStore:
         if existing is None:
             self.record_actual_cost_checkpoint('resource_charged', identifier)
         self.connection.commit()
+
+    def reserve_gpu_execution(self, identity, run_id, category, hours, total_limit, profiling_limit):
+        if (category not in ('profiling', 'validation', 'benchmark')
+                or not all(math.isfinite(value) and value > 0 for value in (hours, total_limit))
+                or not math.isfinite(profiling_limit) or profiling_limit < 0):
+            raise ValueError('GPU 预留需要有效类别、用量和预算')
+        with self.connection:
+            self.connection.execute('BEGIN IMMEDIATE')
+            previous = self.connection.execute(
+                'SELECT run_id, category, hours, active FROM gpu_execution_reservations WHERE id=?',
+                (identity,)).fetchone()
+            if previous is not None and previous[:2] != (run_id, category):
+                raise ValueError('GPU 预留身份与运行编号不同')
+            if previous is not None and previous[3]:
+                return True
+            pending = dict(self.connection.execute(
+                'SELECT category, SUM(hours) FROM gpu_execution_reservations WHERE active=1 GROUP BY category'))
+            usage = self.usage()
+            if usage.get('gpu_hours', 0) + sum(pending.values()) + hours > total_limit + 1e-9:
+                return False
+            if category != 'benchmark' and (usage.get('profiling_gpu_hours', 0)
+                    + pending.get('validation', 0) + pending.get('profiling', 0) + hours > profiling_limit + 1e-9):
+                return False
+            self.connection.execute('INSERT INTO gpu_execution_reservations VALUES (?, ?, ?, ?, 1) '
+                'ON CONFLICT(id) DO UPDATE SET hours=excluded.hours, active=1', (identity, run_id, category, hours))
+        return True
+
+    def release_gpu_execution(self, identity):
+        self.connection.execute('UPDATE gpu_execution_reservations SET active=0 WHERE id=?', (identity,))
+        self.connection.commit()
+
+    def record_gpu_receipt(self, identity, run_id, category, gpu_count, receipt):
+        if category not in ('profiling', 'validation', 'benchmark') or type(gpu_count) is not int or gpu_count < 1:
+            raise ValueError('GPU 回执需要明确的运行类别和设备数量')
+        if 'run_id' in receipt and receipt['run_id'] != run_id:
+            raise ValueError('GPU 回执与当前运行编号不同')
+        seconds = receipt['gpu_allocation_seconds']
+        if type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds < 0:
+            raise ValueError('GPU 占用时间需要有限的实测秒数')
+        hours = gpu_count * seconds / 3600
+        self.charge(identity + ':gpu', 'gpu_hours', hours)
+        if category != 'benchmark':
+            self.charge(identity + ':profile', 'profiling_gpu_hours', hours)
+        self.release_gpu_execution(identity)
+        self.add_search_state('GPU_EXECUTION_RECEIPT', dict(run_id=run_id, category=category,
+            gpu_hours=hours, status=receipt.get('status', 'COLLECTION_PENDING')))
+        return hours
 
     def set_cost_clock(self, session_id, started):
         if not math.isfinite(started) or started > time.perf_counter():

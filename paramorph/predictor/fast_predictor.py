@@ -11,7 +11,7 @@ from core_data_models import ExecutionPlan, HardwareTopology, Task, TaskType
 from cost.cost_model import ExecutionCostModel, MissingCalibration
 from cost.runtime_calibration import configuration
 from scheduling.schedule_simulator import ScheduleCostEvaluator
-from scheduling.native_microbatches import native_schedule_table
+from scheduling.native_schedule_lowerer import native_stage_sequence
 from .profile_database import ProfileDatabase, normalized_execution, signature, plan_signature
 from .graph_delta import graph_delta, profile_key
 from .compute_cost import KernelCostSurface
@@ -67,7 +67,7 @@ class FastPredictor:
             for row in self.database.overlap_profiles()]
         resource_replay['compute_communication_slowdowns'] = [
             *resource_replay.get('compute_communication_slowdowns', []), *measured]
-        resource_replay.setdefault('unmeasured_overlap_gamma', 1.0)
+        resource_replay.pop('unmeasured_overlap_gamma', None)
         hardware_parameters['resource_replay'] = resource_replay
         self.projector = DAGProjector(model, model_graph, topology, self.compute_surface,
             self.communication_surface, hardware_parameters, self._native_stage_sequence)
@@ -507,24 +507,7 @@ class FastPredictor:
         与 ProgramAgent.compile 使用相同的原生schedule_table。
         再按 simulate_native_program 的 warmup 规则展开为 per-stage 序列。
         """
-        table = native_schedule_table(num_microbatches, pp, vp_size, group)
-        if set(table) != {(mb, vp) for mb in range(num_microbatches) for vp in range(vp_size)}:
-            raise ValueError('调度表没有完整覆盖全部microbatch与虚拟阶段')
-        forward = list(table)
-        backward = [(mb, vp_size - vp - 1) for mb, vp in table]
-        if vp_size == 1:
-            warmup = min(pp - pp_rank - 1, num_microbatches)
-        else:
-            first_group = next((index for index, (_, vp) in enumerate(table) if vp != 0), len(table))
-            warmup = min((pp - pp_rank - 1) * 2 + (vp_size - 1) * first_group, len(forward))
-        sequence = [('forward_compute', vp, mb) for mb, vp in forward[:warmup]]
-        for index in range(len(forward) - warmup):
-            mb, vp = forward[index + warmup]
-            sequence.append(('forward_compute', vp, mb))
-            mb, vp = backward[index]
-            sequence.append(('backward_compute', vp, mb))
-        sequence += [('backward_compute', vp, mb) for mb, vp in backward[len(forward) - warmup:]]
-        return sequence
+        return native_stage_sequence(pp_rank, pp, vp_size, num_microbatches, group)
 
     def _simulate(self, request, profile):
         template_key = hashlib.sha256(json.dumps(profile, sort_keys=True).encode()).hexdigest()

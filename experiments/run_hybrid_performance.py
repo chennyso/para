@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'paramorph'))
 from schedule_validator import ScheduleValidator
 from hybrid_node import launch_geometry
+from predictor.runtime_receipt import effective_runtime_receipt
 PODS = tuple(os.environ.get('PARAMELD_TRAINER_PODS', '').split())
 REMOTE = Path(os.environ.get('PARAMELD_REMOTE_RUNS', '/workspace/frontier/hybrid-performance-20261008'))
 
@@ -359,6 +360,9 @@ def execute(request, output, nodes, resume_existing=False, extra_sources=None, m
             execution_deadline_reached or record.get('execution_deadline_reached', False))
         record['pvc_raw_artifacts'] = record['raw_artifacts']
         record['raw_artifacts'] = str(artifacts)
+        if record['status'] == 'PASS':
+            manifests = [json.loads((artifacts / f'rank{rank}.manifest.json').read_text()) for rank in range(world)]
+            record.update(effective_runtime_receipt(request, sources, manifests))
         write(directory / 'result.json', record)
         print(json.dumps({key: record.get(key) for key in ('run_id', 'status', 'tokens_per_second',
             'step_seconds', 'peak_allocated_gib', 'gpu_allocation_seconds')}), flush=True)
@@ -477,6 +481,7 @@ def execute(request, output, nodes, resume_existing=False, extra_sources=None, m
         if request.get('record_native_schedule'):
             from scheduling.native_microbatches import verify_native_schedule
             record['native_pipeline_schedule'] = verify_native_schedule(request, manifests)
+        record.update(effective_runtime_receipt(request, sources, manifests))
         window = max(row['window_seconds'] for row in rows)
         record.update(status='PASS', performance_eligible=not (request.get('profile', False)
             or request.get('instrumented', False) or request.get('validation_mode')),

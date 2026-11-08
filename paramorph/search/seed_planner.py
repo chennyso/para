@@ -382,7 +382,7 @@ class SeedPlanner:
                 output.append(rows[0])
         return output
 
-    def generate(self, request, evidence_id, limit):
+    def generate(self, request, evidence_id, limit, *, dimensions=()):
         if type(limit) is not int or limit < 1:
             raise ValueError('确定性候选上限必须为正整数')
         parent = self.rewriter.candidate(request)
@@ -393,6 +393,8 @@ class SeedPlanner:
         buckets = {}
 
         def add(family, values, hypothesis, adjustable=()):
+            if dimensions and not set(values).intersection(dimensions):
+                return
             automatic = {'dp', 'expert_dp', 'etp', 'ep', 'vpp', 'group', 'decoder_chunks'}
             automatic.update(adjustable)
             automatic -= set(values)

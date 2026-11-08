@@ -88,6 +88,7 @@ def compare_execution_reports(left_request, left_prediction, right_request, righ
     anchors = [row.get('evidence', {}).get('compatible_anchor_id') for row in predictions]
     same_calibration = anchors[0] == anchors[1]
     comparable = comparable and same_calibration
+    comparable = comparable and all(row['performance'].get('ranking_eligible', True) for row in predictions)
     left_ranks, left_owners = _rank_records(left_prediction)
     right_ranks, right_owners = _rank_records(right_prediction)
     all_ranks = sorted(left_ranks.keys() | right_ranks.keys(), key=int)
@@ -135,11 +136,19 @@ def compare_execution_reports(left_request, left_prediction, right_request, righ
             old, new = left_operations.get(kind, empty), right_operations.get(kind, empty)
             operations.append(dict(operation=kind, before=old, after=new,
                 delta={name: new[name] - old[name] for name in empty}))
+    def difference(key):
+        return (after[key] - before[key] if comparable and before[key] is not None and after[key] is not None else None)
+
     return dict(status='AVAILABLE' if comparable else 'INCOMPARABLE_CALIBRATION' if not same_calibration
+            else 'NEEDS_PROFILE' if any(not row['performance'].get('ranking_eligible', True) for row in predictions)
             else 'INCOMPARABLE_COST_REVISIONS',
         calibration_anchors=anchors,
         numeric_comparison_eligible=comparable, before=before, after=after,
         predicted_step_delta_ms=after['step_time_ms'] - before['step_time_ms'] if comparable_times else None,
+        exposed_communication_delta_ms=difference('modeled_exposed_communication_ms'),
+        peak_memory_delta_bytes=difference('estimated_peak_bytes'),
+        prediction_uncertainty=[row['performance'].get('prediction_uncertainty') for row in predictions],
+        missing_cost_evidence=[row.get('evidence', {}).get('missing_profiles', []) for row in predictions],
         module_ownership_changes=movements[offset:offset + limit], module_change_count=len(movements),
         rank_changes=rank_changes, rank_count=len(all_ranks), offset=offset,
         operation_changes=operations,

@@ -47,6 +47,22 @@ python paramorph/experiments/run_system_search.py \
 实际 GPU·小时。GPU 锁等待时间单独记录。Megatron 训练回执保存实际执行的
 微批调度表和 P2P 配置；缺少匹配的成本证据时，预计收益保留为空。
 
+正式消融使用各自独立的搜索目录：
+
+| `agent_ablation` | 运行设置 |
+| --- | --- |
+| `full` | Agent、原生事件图预测和条件联合搜索 |
+| `without_dag_model` | 阶段计算与通信成本、流水线气泡估计；屏蔽图反馈 |
+| `without_agent` | 确定性候选生成和选择；使用相同的事件图和训练后端 |
+| `without_joint_search` | 保留 Agent 和 DAG；配置为单次决策和预算选择，候选只允许一个独立调节轴 |
+
+`without_dag_evidence` 用于只考察图反馈的影响，其成本预测仍使用事件图。
+阶段估计仅复用满足执行条件的实测阶段、链路与优化器成本；缺失条件保持待测。
+各组应共享训练协议、硬件与 GPU·小时上限。独立重复使用不同的输出目录及种子，
+完整数值等价仅在专门验证通过的回执中声明。
+五模型的共同预算、测量窗口和重复种子见
+[`five_model_protocol.json`](paramorph/experiments/five_model_protocol.json)。
+
 以下验证脚本读取历史 MiMo、Falcon 和 FSDP 回执，以及新共同基线的逐 Rank
 调度记录：
 
@@ -55,7 +71,15 @@ export PYTHONPATH="$PWD/paramorph:$PWD/integration:$PYTHONPATH"
 python paramorph/tests/verify_budgeted_schedule_receipts.py \
   --archive /path/to/overnight-results \
   --native-run /path/to/qwen14/common/training/runs/run-id
+python paramorph/tests/verify_experiment_contracts.py \
+  --campaign /path/to/five-model-results \
+  --archive /path/to/overnight-results \
+  --output local-work/verification.sqlite
 ```
+
+`paramorph/experiments/evaluate_prediction_pairs.py` 接受 JSONL 盲测配对，
+每行包含 `prediction`、`measurement`、`measured_plan_signature` 和
+`workload_fingerprint`，计算步时、显存及候选排序误差；预测缺失单独计数。
 
 ## 主要数据
 

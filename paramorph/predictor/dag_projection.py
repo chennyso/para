@@ -20,12 +20,14 @@ from predictor.parameter_metadata import checkpoint_parameter_counts
 from predictor.physical_paths import communication_resources
 from predictor.state_sharding import parameter_state_ownership, phased_memory_bounds, state_sharding_config
 from region_partition.region_partitioner import RegionPartitioner
+from scheduling.native_schedule_lowerer import lower_native_schedule
 from scheduling.schedule_simulator import ScheduleCostEvaluator, topological_order, union_length
 from scheduling.task_graph_builder import TaskGraphBuilder
 
 
 DTYPE_BYTES = {'bfloat16': 2, 'float16': 2, 'float32': 4}
-PROJECTION_REVISION = 'native_execution_conditions_v42_selective_recomputation'
+
+PROJECTION_REVISION = 'native_event_graph_v43_overlap_admission'
 
 OPTIMIZER_PROFILE_FIELDS = (
     'model', 'checkpoint', 'optimizer', 'optimizer_config', 'optimizer_sharding',
@@ -640,27 +642,8 @@ class DAGProjector:
                 region_id=row.get('region_id', row.get('region')),
                 dependencies=list(row.get('dependencies', [])), metadata=deepcopy(row.get('metadata', {})))
         topological_order(tasks)
-        producer_sends = defaultdict(list)
-        for key, task in tasks.items():
-            if task.task_type == TaskType.PP_P2P_SEND:
-                producer_sends[task.metadata.get('producer_task')].append(key)
-        lanes = config.world_size // config.pp
-        compute_index = {(task.rank, task.task_type.value, task.region_id // config.pp, task.microbatch_id): key
-                         for key, task in tasks.items()
-                         if task.task_type in (TaskType.FORWARD_COMPUTE, TaskType.BACKWARD_COMPUTE)}
-        expected = {(rank, kind, vp, mb) for rank in range(config.world_size)
-                    for kind in ('forward_compute', 'backward_compute')
-                    for vp in range(config.vpp) for mb in range(config.num_microbatches)}
-        if set(compute_index) != expected or len(compute_index) != 2 * config.world_size * config.vpp * config.num_microbatches:
-            raise ValueError('C1执行DAG没有完整覆盖当前配置全部计算任务')
-        for rank in range(config.world_size):
-            sequence = self.native_sequence(rank // lanes, config.pp, config.vpp,
-                                            config.num_microbatches, config.microbatch_group)
-            ordered = [compute_index[(rank, kind, vp, mb)] for kind, vp, mb in sequence]
-            for previous, following in zip(ordered, ordered[1:]):
-                tasks[following].dependencies.append(previous)
-                if not request.get('overlap_p2p', False):
-                    tasks[following].dependencies.extend(producer_sends[previous])
+        lower_native_schedule(tasks, config, request.get('overlap_p2p', False),
+            lambda parent, child: tasks[child].dependencies.append(parent))
         return source, tasks, None
 
     def _select_reusable_profile(self, request):
@@ -1531,6 +1514,15 @@ class DAGProjector:
                 if sensitivity_values else None))
         report['evidence']['cost_sources'] = dict(cost_sources)
         report['evidence']['profiling_targets'] = report['evidence']['profiling_requests']
+        overlap_unknown = bool(resource_replay['missing_overlap_profiles']) and profile_anchor is None
+        report['performance']['ranking_eligible'] = not overlap_unknown
+        if overlap_unknown:
+            report['prediction_status'] = 'NEEDS_PROFILE'
+            report['validation'].update(status='REQUIRES_PROFILING',
+                reason='当前计算与通信并发条件缺少实测减速费用')
+            report['performance'].update(step_time_ms=None, tokens_per_second=None,
+                speedup_vs_parent=None, prediction_interval_ms=None)
+            report['evidence']['unmeasured_overlap_timeline_scope'] = 'optimistic_scenario_not_for_ranking'
         return report
 
     def _gradient_tasks(self, tasks, counts, config, request, costs):

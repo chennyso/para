@@ -12,6 +12,7 @@ from core_data_models import Candidate
 from graph.bottleneck_analysis import BottleneckGraph
 from region_partition.region_partitioner import RegionPartitioner
 from scheduling.task_graph_builder import TaskGraphBuilder
+from scheduling.native_schedule_lowerer import lower_native_schedule
 from validation.parallel_validator import validate_candidate
 from scheduling.native_microbatches import valid_microbatch_group
 
@@ -438,6 +439,14 @@ class StrategyTransformationCompiler:
         before = self.graph(parent)
         after = self.graph(candidate)
         before_keys, after_keys = set(before.tasks), set(after.tasks)
+        def schedule_edges(dag):
+            return {(predecessor, key) for key, task in dag.tasks.items()
+                if 'native_schedule_position' in task.metadata
+                for predecessor in task.dependencies
+                if ('native_schedule_position' in dag.tasks[predecessor].metadata
+                    and dag.tasks[predecessor].rank == task.rank)
+                or dag.tasks[predecessor].metadata.get('native_launch_policy') == 'blocking'}
+        old_schedule, new_schedule = schedule_edges(before), schedule_edges(after)
         config_changes = {key: [asdict(parent.parallel_config)[key], asdict(candidate.parallel_config)[key]]
             for key in asdict(parent.parallel_config)
             if asdict(parent.parallel_config)[key] != asdict(candidate.parallel_config)[key]}
@@ -478,6 +487,8 @@ class StrategyTransformationCompiler:
                 after.tasks[key].metadata.get(name) for name in ('shape', 'dtype', 'group_ranks'))}
         return dict(added_task_ids=sorted(after_keys - before_keys),
             removed_task_ids=sorted(before_keys - after_keys), modified_task_ids=modified,
+            changed_schedule_edges=dict(added=sorted(new_schedule - old_schedule),
+                removed=sorted(old_schedule - new_schedule), source='native_schedule_lowerer'),
             added_edges=sorted(set(after.edges) - set(before.edges)),
             removed_edges=sorted(set(before.edges) - set(after.edges)),
             config_changes=config_changes, affected_task_ids=sorted(affected),
@@ -882,6 +893,8 @@ class StrategyTransformationCompiler:
             raise ValueError(errors)
         dag = TaskGraphBuilder().build(self.model, candidate.parallel_config,
             candidate.region_layout, candidate.parallel_config.num_microbatches)
+        lower_native_schedule(dag.tasks, candidate.parallel_config,
+            bool(candidate.parallel_config.execution_implementation.get('overlap_p2p')), dag.add_dependency)
         if dag.has_cycle():
             raise ValueError('训练任务图存在循环依赖')
         return dag
@@ -896,7 +909,7 @@ class StrategyTransformationCompiler:
                 metadata=task.metadata) for key, task in dag.tasks.items()})
         graph_hash = hashlib.sha256(json.dumps(graph, sort_keys=True).encode()).hexdigest()
         # 内部Collective保持复合计算语义，避免将未提取的操作伪装成独立节点。
-        graph.update(graph_sha256=graph_hash, representation='region_training_task_dag',
+        graph.update(graph_sha256=graph_hash, representation='native_region_event_graph_v1',
             opaque_operations=['region_internal_tp_cp_ep_collectives'],
             semantic_sources=['Megatron PipelineParallelLayerLayout',
                 'Megatron get_schedule_table', 'Megatron gradient_finalize'],

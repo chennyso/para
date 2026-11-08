@@ -38,6 +38,32 @@ def schedule_change(parent, candidate):
     return None
 
 
+def coordinate_axes(parent, candidate):
+    left, right = effective_schedule_execution(parent), effective_schedule_execution(candidate)
+    fields = ('tp', 'pp', 'cp', 'ep', 'etp', 'dp', 'vpp', 'micro_batch', 'group',
+        'decoder_chunks', 'recompute', 'overlap_p2p', 'bucket_elements', 'rank_mapping',
+        'execution_backend', 'optimizer_sharding', 'optimizer_offload_fraction',
+        'precision_aware_optimizer', 'memory_policy')
+    changed = {key for key in fields if left.get(key) != right.get(key)}
+    if changed.intersection({'tp', 'pp', 'cp'}):
+        changed.discard('dp')
+    if 'tp' in changed and right['execution_backend'] == 'megatron_ddp' and right['etp'] == right['tp']:
+        changed.discard('etp')
+    if changed.intersection({'pp', 'vpp'}):
+        slots = right['pp'] * right['vpp']
+        count = sum(left['decoder_chunks'])
+        if right['decoder_chunks'] == [count // slots + (index < count % slots) for index in range(slots)]:
+            changed.discard('decoder_chunks')
+        if right['group'] is None or right['group'] == right['pp']:
+            changed.discard('group')
+        if right['vpp'] == 1 and not right['overlap_p2p']:
+            changed.discard('overlap_p2p')
+    if 'recompute' in changed and all(left['memory_policy'].get(key) == right['memory_policy'].get(key)
+            for key in left['memory_policy'] if key not in ('recompute_granularity', 'recompute_modules')):
+        changed.discard('memory_policy')
+    return sorted(changed)
+
+
 def schedule_control_options(parent, history, groups):
     if not measured_schedule_parent(parent):
         return []

@@ -44,8 +44,26 @@ class WorkloadSpec(Contract):
         return self.global_batch_size * self.sequence_length
 
 
+class EffectiveTrainingPlan(Contract):
+    requested_config: dict
+    effective_config: dict
+    workload_fingerprint: str
+    model_fingerprint: str
+    hardware_fingerprint: str
+    backend_fingerprint: str
+    backend_source_hashes: dict[str, str] = Field(default_factory=dict)
+    schedule_identity: str
+    optimizer_semantics: dict
+
+    @property
+    def effective_plan_hash(self):
+        return fingerprint(dict(model=self.model_fingerprint, hardware=self.hardware_fingerprint,
+            workload=self.workload_fingerprint, backend=self.backend_fingerprint,
+            effective_config=self.effective_config, schedule_identity=self.schedule_identity))
+
+
 class TrainingPlan(Contract):
-    identity_revision: Literal['v2', 'v3'] = 'v2'
+    identity_revision: Literal['v2', 'v3', 'v4'] = 'v2'
     plan_id: str
     parent_plan_id: str | None
     model_fingerprint: str
@@ -111,7 +129,27 @@ class TrainingPlan(Contract):
         return self
 
     @property
+    def effective_plan(self):
+        from predictor.profile_database import effective_execution_config
+        from scheduling.native_microbatches import native_schedule_settings
+
+        request = self.backend_config
+        effective = effective_execution_config(request) | dict(decoder_chunks=self.region_partition)
+        return EffectiveTrainingPlan(requested_config=request, effective_config=effective,
+            workload_fingerprint=self.workload_fingerprint, model_fingerprint=self.model_fingerprint,
+            hardware_fingerprint=self.hardware_fingerprint, backend_fingerprint=self.backend_fingerprint,
+            backend_source_hashes=request.get('backend_source_hashes', {}),
+            schedule_identity=fingerprint(native_schedule_settings(request)),
+            optimizer_semantics=self.optimizer_configuration)
+
+    @property
+    def effective_plan_hash(self):
+        return self.effective_plan.effective_plan_hash
+
+    @property
     def plan_hash(self):
+        if self.identity_revision == 'v4':
+            return self.effective_plan_hash
         from predictor.profile_database import normalized_execution
         payload = self.model_dump(exclude={'plan_id', 'parent_plan_id', 'transformations', 'identity_revision'})
         payload['backend_config'] = normalized_execution(self.backend_config)
@@ -258,7 +296,8 @@ class SystemConfig(Contract):
     capability_domains: dict[str, list[int]]
     gpu_lock_path: str
     evaluation_mode: Literal['full', 'config_only', 'graph_aware', 'graph_impact', 'multi_agent', 'seed', 'random_region'] = 'full'
-    agent_ablation: Literal['full', 'without_dag_evidence', 'without_bottleneck_agent',
+    agent_ablation: Literal['full', 'without_dag_evidence', 'without_dag_model', 'without_agent',
+        'without_joint_search', 'without_bottleneck_agent',
         'without_search_memory', 'single_agent'] = 'full'
     execution_evidence_format: Literal['legacy', 'execution_view', 'flat_records'] = 'legacy'
     run_namespace: str = ''

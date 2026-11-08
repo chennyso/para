@@ -167,8 +167,7 @@ class ScheduleCostEvaluator:
                     compute.task_id, communication.task_id,
                     communication.metadata.get('payload_bytes'))
                 missing.add(identity)
-                matched.append((communication.task_id,
-                    float(resource_model.get('unmeasured_overlap_gamma', 1.0)), []))
+                # 缺失项仅进入诊断；回放时间不能作为已标定结果用于排序。
         gamma = max([1.0] + [row[1] for row in matched])
         return gamma, matched
 

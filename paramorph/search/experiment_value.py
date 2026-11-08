@@ -1,4 +1,5 @@
 import math
+from itertools import combinations
 from statistics import mean
 
 
@@ -18,6 +19,31 @@ def budgeted_selection_values(options, *, gpu_execution_enabled, full_training_t
 
 def same_condition(first, second, fields):
     return all(first.get(key) == second.get(key) for key in fields)
+
+
+def paired_measurements(history, limit=4):
+    from predictor.profile_database import effective_execution_config
+
+    observed = [row for row in history if (row.get('measurement') or {}).get('performance_eligible') is True]
+    output = []
+    for before, after in combinations(observed[-8:], 2):
+        a, b = before['measurement'], after['measurement']
+        left, right = before['plan']['backend_config'], after['plan']['backend_config']
+        if a['run_id'] == b['run_id'] or not same_condition(a, b, WORKLOAD_FIELDS):
+            continue
+        first = effective_execution_config(left) | dict(decoder_chunks=left['decoder_chunks'])
+        second = effective_execution_config(right) | dict(decoder_chunks=right['decoder_chunks'])
+        changed = {key: [first.get(key), second.get(key)] for key in first.keys() | second.keys()
+            if first.get(key) != second.get(key)}
+        if not changed:
+            continue
+        output.append(dict(before=a['run_id'], after=b['run_id'], changed_settings=changed,
+            throughput_delta=b['tokens_per_second'] - a['tokens_per_second'],
+            peak_memory_delta_gib=b['peak_allocated_gib'] - a['peak_allocated_gib'],
+            gpu_hours_delta=(b['gpu_allocation_seconds'] - a['gpu_allocation_seconds'])
+                * right['node_count'] * right['gpus_per_node'] / 3600,
+            attribution='joint_configuration_pair'))
+    return output[-limit:]
 
 
 def _quantile(values, fraction):

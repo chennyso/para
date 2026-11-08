@@ -1,0 +1,40 @@
+{
+  "protocol": "five_model_common_budget_v1",
+  "devices": 16,
+  "warmup_updates": 5,
+  "measured_updates": 30,
+  "independent_search_seeds": [0, 1, 2],
+  "gpu_hours_per_search": {
+    "Qwen3-14B": 1.979,
+    "MiMo-7B": 3.919,
+    "Mistral-NeMo-12B": 1.986,
+    "Falcon-H1-7B": 4.970,
+    "Qwen3-8B": 3.762
+  },
+  "parameld_modes": [
+    "full",
+    "without_dag_model",
+    "without_agent",
+    "without_joint_search"
+  ],
+  "training_conditions": [
+    "model_checkpoint",
+    "data",
+    "sequence_length",
+    "global_batch_size",
+    "precision",
+    "optimizer",
+    "native_backend",
+    "hardware",
+    "legal_search_space",
+    "initial_measurement"
+  ],
+  "budget_categories": [
+    "profiling",
+    "validation",
+    "benchmark"
+  ],
+  "count_failed_gpu_runs": true,
+  "count_gpu_lock_wait": false,
+  "external_baselines_require_same_backend_and_conditions": true
+}
