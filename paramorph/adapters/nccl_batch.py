@@ -18,7 +18,7 @@ def batch_nccl_request(request, profile_requests, trials):
                 or execution.get('nccl_dtype', 'bfloat16') != dtype
                 or execution.get('nccl_concurrent_group_batches')
                 or any(execution.get(key) != request.get(key) for key in
-                       ('node_count', 'gpus_per_node', 'warmup', 'measured'))):
+                       ('node_count', 'gpus_per_node', 'gpus_per_worker', 'warmup', 'measured'))):
             continue
         included = False
         for key in profile['cost_keys']:

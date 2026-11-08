@@ -1,8 +1,11 @@
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
+from bisect import bisect_left
 import hashlib
 import json
 import math
 from pathlib import Path
+
+import ijson
 
 from contracts import fingerprint
 from core_data_models import Task, TaskType
@@ -11,6 +14,44 @@ from scheduling.schedule_simulator import topological_order
 
 
 WIDTHS = {'float32': 4, 'bfloat16': 2, 'float16': 2}
+
+
+def read_projection_bucket_document(path, expected_digest):
+    with Path(path).open('rb') as stream:
+        if hashlib.file_digest(stream, 'sha256').hexdigest() != expected_digest:
+            raise ValueError('DDP Bucket原始文件与登记的校验值不同')
+        document = {}
+        for field in ('schema_version', 'rank', 'request', 'source', 'event_capture_scope', 'groups'):
+            stream.seek(0)
+            document[field] = next(ijson.items(stream, field, use_float=True))
+        active_groups = {group['group_id'] for group in document['groups']
+            if len(group['physical_ranks']) > 1}
+        stream.seek(0)
+        indexed = [(index, event) for index, event in enumerate(ijson.items(stream, 'events.item', use_float=True))
+            if event['group_id'] in active_groups and (
+                event['operation'] == 'start_grad_sync' and not event['grad_handle_before']
+                or event['operation'] == 'start_param_sync' and not event['param_gather_dispatched_before'])]
+        starts = defaultdict(list)
+        for _, event in indexed:
+            if event['operation'] == 'start_param_sync':
+                starts[event['group_id'], event['step']].append(event['host_start_ns'])
+        for values in starts.values():
+            values.sort()
+        next_groups = {group['group_id']: group['next_param_gather_group_id']
+            for group in document['groups']}
+        stream.seek(0)
+        for index, event in enumerate(ijson.items(stream, 'events.item', use_float=True)):
+            if event['operation'] != 'finish_param_sync' or event['group_id'] not in active_groups:
+                continue
+            candidates = starts.get((next_groups[event['group_id']], event['step']), [])
+            position = bisect_left(candidates, event['host_start_ns'])
+            if position < len(candidates) and candidates[position] <= event['host_end_ns']:
+                indexed.append((index, event))
+        document['events'] = [event for _, event in sorted(indexed)]
+        document['projection_event_selection'] = dict(
+            source_sha256=expected_digest,
+            scope='actual_collective_dispatch_and_native_prefetch_trigger_events_used_by_compiler')
+    return document
 
 
 def bucket_layout_signature(request):
@@ -31,9 +72,7 @@ def load_bucket_evidence(projector, request):
     actual_uuids = {str(device.get('uuid', device.get('gpu_uuid'))).removeprefix('GPU-').lower()
                     for device in projector.topology.devices}
     candidates = []
-    for identifier, encoded in projector.compute_surface.database.connection.execute(
-            'SELECT id, document FROM profiles ORDER BY id'):
-        profile = json.loads(encoded)
+    for identifier, profile in projector.compute_surface.database.measured_profiles():
         if projector.blind and same_training_plan(profile['request'], request):
             continue
         measured_uuids = {str(device.get('gpu_uuid')).removeprefix('GPU-').lower()
@@ -64,9 +103,13 @@ def load_bucket_evidence(projector, request):
         if len(files) != projector.topology.num_gpus:
             continue
         cache_key = (profile['id'], signature, tuple(sorted(actual_uuids)), tuple(files))
-        cached = getattr(projector.compute_surface.database, '_bucket_evidence_cache', None)
-        if cached is not None and cached[0] == cache_key:
-            return cached[1]
+        database = projector.compute_surface.database
+        if not hasattr(database, '_bucket_evidence_cache'):
+            database._bucket_evidence_cache = OrderedDict()
+        cache = database._bucket_evidence_cache
+        if cache_key in cache:
+            cache.move_to_end(cache_key)
+            return cache[cache_key]
         documents = []
         for rank in range(projector.topology.num_gpus):
             name = f'rank{rank}.paramorph-buckets.json'
@@ -74,10 +117,7 @@ def load_bucket_evidence(projector, request):
             path = Path(profile['source_directory']) / 'artifacts' / name
             if not expected or not path.is_file():
                 break
-            payload = path.read_bytes()
-            if hashlib.sha256(payload).hexdigest() != expected:
-                raise ValueError('DDP Bucket原始文件与登记的校验值不同')
-            row = json.loads(payload)
+            row = read_projection_bucket_document(path, expected)
             if (row['schema_version'] != 1 or row['rank'] != rank
                     or bucket_layout_signature(row['request']) != signature):
                 raise ValueError('DDP Bucket的训练计划或Rank身份不一致')
@@ -88,7 +128,10 @@ def load_bucket_evidence(projector, request):
         if len(documents) == projector.topology.num_gpus:
             result = dict(profile_id=profile['id'], documents=documents,
                 evidence_scope='bucket_layout_compatible_structural_metadata_without_cost_timing_reuse')
-            projector.compute_surface.database._bucket_evidence_cache = (cache_key, result)
+            cache[cache_key] = result
+            cache.move_to_end(cache_key)
+            while len(cache) > 4:
+                cache.popitem(last=False)
             return result
     return None
 
@@ -127,6 +170,7 @@ def split_measured_regions(tasks, costs):
                 dependencies=previous if not boundary_after else [], resource_requirements=task.resource_requirements,
                 metadata=dict(origin_task=key, operation='region_boundary_composite',
                     cost_components=residual, region_execution_index=len(layers) if boundary_after else -1,
+                    duration_evidence=sorted({reference for row in residual for reference in row['evidence_ids']}),
                     special_module_dependency_scope='measured_boundary_composite'))
             if 'first' in categories:
                 positions[(task.rank, task.task_type.value, task.microbatch_id, 'embedding')] = residual_id
@@ -145,6 +189,8 @@ def split_measured_regions(tasks, costs):
                 dependencies=previous, resource_requirements=task.resource_requirements,
                 metadata=dict(origin_task=key, operation=task.task_type.value, logical_layer=layer,
                     region_execution_index=execution_index,
+                    duration_evidence=sorted({reference for row in components[layer]
+                        for reference in row['evidence_ids']}),
                     cost_components=components[layer], execution_granularity='measured_layer_composite'))
             positions[(task.rank, task.task_type.value, task.microbatch_id, layer)] = child
             previous = [child]
@@ -157,6 +203,7 @@ def split_measured_regions(tasks, costs):
         task.duration = 0.0
         task.resource_requirements = ()
         task.metadata['cost_components'] = []
+        task.metadata['duration_source'] = 'structural_region_completion_marker'
         task.metadata['ddp_bucket_dependency_granularity'] = 'measured_layer'
     return positions
 
@@ -275,11 +322,13 @@ def compile_bucket_tasks(projector, tasks, config, request, costs, phase):
             values.append(value)
             resources.update(used)
             payloads.append(dict(bucket_id=bucket['bucket_id'], payload_bytes=payload, dtype=dtype))
+        components = projector._cost_components(costs[beginning:])
         tasks[key] = Task(key, logical_ranks[0], TaskType.NCCL_GENERIC, duration=projector._total(values),
             dependencies=sorted(dependencies), resource_requirements=tuple(sorted(resources)),
             metadata=dict(operation=f'ddp_bucket_{phase}', collective=collective,
                 participant_ranks=logical_ranks, group_id=group_id, physical_ranks=list(physical_ranks),
-                communication_payloads=payloads, cost_components=projector._cost_components(costs[beginning:]),
+                communication_payloads=payloads, cost_components=components,
+                duration_evidence=sorted({reference for row in components for reference in row['evidence_ids']}),
                 evidence_ids=[evidence['profile_id']], buffer_aliases=['persistent_DDP_parameter_and_gradient_buffers'],
                 ownership_iteration='previous_optimizer_to_current_forward' if phase == 'parameter' and group['overlap_param_gather'] else 'current_step',
                 observed_dispatch_regions=[event['active_region'] for event in observed]))
@@ -318,6 +367,8 @@ def compile_bucket_tasks(projector, tasks, config, request, costs, phase):
                 tasks[launch] = Task(launch, tasks[consumer].rank, TaskType.CUDA_SYNC, duration=0,
                     dependencies=[*base_dependencies[consumer], communication_ids[identity]],
                     metadata=dict(operation='bucket_prefetch_dispatch', cost_components=[],
+                        duration_evidence=[evidence['profile_id']],
+                        duration_source='structural_zero_duration_dispatch',
                         dispatch_evidence='recorded_start_param_sync_inside_finish_param_sync',
                         source_step=following['step']))
                 parameter_prerequisites[next_identity][logical] = {launch}

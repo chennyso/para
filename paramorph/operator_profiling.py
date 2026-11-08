@@ -5,6 +5,9 @@ import torch
 
 
 def install_operator_profiling(evidence, models):
+    scope = evidence.request.get('paramorph_operator_scope', 'all')
+    if scope not in ('all', 'boundary'):
+        raise ValueError('模块成本采集范围无效')
     for vp, model in enumerate(models):
         layer_ids = {id(module): layer.layer_number - 1 for layer in model.decoder.layers
                      for module in layer.modules()}
@@ -12,6 +15,8 @@ def install_operator_profiling(evidence, models):
             if not name:
                 continue
             component = name.rsplit('.', 1)[-1]
+            if scope == 'boundary' and component not in ('output_layer', 'final_layernorm'):
+                continue
             categories = dict(linear_qkv='attention_projection', linear_proj='attention_projection',
                 core_attention='attention_core', linear_fc1='mlp_gemm', linear_fc2='mlp_gemm',
                 router='router', experts='expert_grouped_gemm',

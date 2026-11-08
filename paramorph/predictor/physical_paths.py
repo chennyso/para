@@ -38,36 +38,39 @@ def communication_resources(topology, ranks):
     adapters = topology.get('paths') or []
     for node, participants in nodes.items():
         per_node = topology.get('environment_per_node', {})
-        environment = per_node.get(node, topology.get('environment', {}))
-        if topology.get('environment_per_rank'):
-            environment = topology['environment_per_rank'][str(participants[0])]
-        if len(nodes) == 1:
-            if str(environment.get('NCCL_P2P_DISABLE')) == '1':
-                for rank in participants:
+        per_rank = topology.get('environment_per_rank') or {}
+        default = per_node.get(node, topology.get('environment', {}))
+        environments = {rank: per_rank.get(str(rank), default) for rank in participants}
+        selections = set()
+        for rank, environment in environments.items():
+            if len(nodes) == 1 and environment.get('NCCL_NET') != 'IB':
+                if str(environment.get('NCCL_P2P_DISABLE')) == '1':
                     numa = devices[rank].get('numa_node')
                     if numa is None:
                         missing.append(f'rank:{rank}:host_numa')
                     else:
                         resources.add(f'host_memory:{node}:numa:{numa}')
-            continue
-        selection = environment.get('NCCL_IB_HCA')
-        if not selection or ',' in selection or selection.startswith('^'):
-            missing.append(f'node:{node}:observed_active_ib_ports')
-            continue
-        selected_name = selection.removeprefix('=').partition(':')[0]
-        selected = [row for row in adapters if str(row.get('node_index')) == node
-                    and row.get('name') == selected_name]
-        if len(selected) != 1:
-            missing.append(f'node:{node}:adapter:{selected_name}:pci_path')
-            continue
-        adapter = selected[0]
-        local = pci_resources(node, adapter['pci_path'])
-        resources.update(local)
-        for port in adapter['ports']:
-            resources.add(f'ib_port:{node}:{selected_name}:{port}')
-        paths.append(dict(node=node, adapter=selected_name, pci_path=adapter['pci_path'],
-            numa_node=adapter.get('numa_node'), resource_ids=local))
-        missing.append(f'node:{node}:runtime_gdr_or_host_staging')
+                continue
+            selection = environment.get('NCCL_IB_HCA')
+            if not selection or ',' in selection or selection.startswith('^'):
+                missing.append(f'node:{node}:observed_active_ib_ports')
+                continue
+            selections.add(selection.removeprefix('=').partition(':')[0])
+        for selected_name in sorted(selections):
+            selected = [row for row in adapters if str(row.get('node_index')) == node
+                        and row.get('name') == selected_name]
+            if len(selected) != 1:
+                missing.append(f'node:{node}:adapter:{selected_name}:pci_path')
+                continue
+            adapter = selected[0]
+            local = pci_resources(node, adapter['pci_path'])
+            resources.update(local)
+            port_owner = adapter.get('physical_device_path', selected_name)
+            for port in adapter['ports']:
+                resources.add(f'ib_port:{node}:{port_owner}:{port}')
+            paths.append(dict(node=node, adapter=selected_name, pci_path=adapter['pci_path'],
+                numa_node=adapter.get('numa_node'), resource_ids=local))
+            missing.append(f'node:{node}:runtime_gdr_or_host_staging')
     return dict(resource_ids=sorted(resources), physical_paths=paths,
         missing_topology=sorted(set(missing)),
         path_source='recorded_sysfs_gpu_and_selected_nccl_adapter_paths',

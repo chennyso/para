@@ -99,6 +99,7 @@ class HardwareTopology:
     network_paths: List[Dict] = field(default_factory=list)
     software: Dict = field(default_factory=dict)
     environment_per_node: Dict = field(default_factory=dict)
+    environment_per_rank: Dict = field(default_factory=dict)
 
     def validate(self) -> bool:
         return self.num_gpus == self.num_nodes * self.gpus_per_node

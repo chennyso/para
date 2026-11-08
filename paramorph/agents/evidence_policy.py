@@ -8,9 +8,17 @@ STRUCTURAL_TOOLS = frozenset({
     'query_affected_decisions', 'inspect_execution_graph', 'compare_candidate_graph_delta',
     'inspect_region', 'inspect_communication', 'analyze_transformation_interactions',
     'preview_transformation',
+    'inspect_execution_impact',
 })
 HISTORY_TOOLS = frozenset({'get_trial_history', 'inspect_trial_history'})
 GRAPH_FIELDS = frozenset({
+    'physical_parallel_alternatives', 'cross_shape_investigations', 'schedule_controls',
+    'execution_revisions',
+    'execution_impact',
+    'parent_native_execution_effects', 'native_execution_effects',
+    'execution_view', 'execution_structure',
+    'diagnostic_evidence',
+    'execution_analysis', 'candidate_execution_analysis',
     'dag_index', 'model_graph', 'training_graph', 'execution_graph', 'graph_delta',
     'critical_path', 'critical_path_graph', 'critical_tasks', 'critical_regions',
     'critical_path_tasks', 'affected_tasks', 'affected_regions', 'target_regions',
@@ -30,6 +38,10 @@ GRAPH_FIELDS = frozenset({
     'peak_per_rank_bytes', 'memory_headroom_per_rank_bytes', 'liveness_intervals', 'memory_events',
 })
 MEMORY_FIELDS = frozenset({
+    'prior_episode',
+    'proposal_archive',
+    'policy_comparisons',
+    'strategy_decision_evidence',
     'recent_history', 'recent_search_rounds', 'recent_profiling_results',
     'recent_note_evidence_refs', 'measured_strategy_memory', 'conditional_failure_memory',
     'family_status_counts', 'best_measured', 'best_measured_tokens_per_s',
@@ -48,7 +60,7 @@ class AblationEvidencePolicy:
 
     @property
     def contract(self):
-        return dict(mode=self.mode, version='agent_evidence_visibility_v1',
+        return dict(mode=self.mode, version='agent_evidence_visibility_v2_execution_view',
             graph_evaluator='unchanged', native_constraints='unchanged',
             candidate_space='unchanged', scalar_scores='available')
 

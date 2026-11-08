@@ -197,6 +197,10 @@ class FastPredictor:
         parent_request = parent_plan.backend_config if hasattr(parent_plan, 'backend_config') else parent_plan
         report = self.projector.project(request, candidate_graph=candidate_graph,
             parent_request=parent_request, cost_mode=cost_mode, blind=blind)
+        if report['prediction_status'] == 'NEEDS_PROFILE':
+            report['memory'] = self.projector.memory_bound(request, blind=blind)
+            report['evidence']['memory_evaluation_scope'] = (
+                'parameter_ownership_and_activation_bound_independent_of_missing_task_times')
         report['evaluation_seconds'] = time.perf_counter() - started
         report['cost_database_revision'] = self.database.cost_database_revision()
         report['prediction_id'] = hashlib.sha256(json.dumps(dict(
@@ -657,6 +661,14 @@ class FastPredictor:
                     required_observations=['layer_forward_backward_recompute', 'pipeline_links',
                                            'saved_activations', 'optimizer_states', 'native_schedule'])]),
             evaluation_seconds=time.perf_counter() - started)
+        if self.projector is not None:
+            report['memory'] = self.projector.memory_bound(request, blind=blind)
+            report['evidence']['memory_evaluation_scope'] = (
+                'parameter_ownership_and_activation_bound_independent_of_missing_task_times')
+            report['prediction_id'] = hashlib.sha256(json.dumps(dict(
+                source_prediction=report['prediction_id'], memory=report['memory']),
+                sort_keys=True, allow_nan=False).encode()).hexdigest()
+            report['evaluation_seconds'] = time.perf_counter() - started
         if persist:
             self.database.save_prediction(report)
         return report

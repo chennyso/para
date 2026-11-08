@@ -47,7 +47,10 @@ class MemoryAudit:
         self.history_limit = int(self.evidence.request.get('paramorph_memory_history_limit', 10000))
         if not 1000 <= self.history_limit <= 50000:
             raise ValueError('CUDA allocator历史容量必须位于1000到50000条事件之间')
-        torch.cuda.memory._record_memory_history(enabled='all', context='all', stacks='python',
+        self.history_context = self.evidence.request.get('paramorph_memory_history_context')
+        if self.history_context not in (None, 'state', 'alloc', 'all'):
+            raise ValueError('CUDA分配历史的调用位置设置无效')
+        torch.cuda.memory._record_memory_history(enabled='all', context=self.history_context, stacks='python',
                                                 max_entries=self.history_limit, clear_history=True)
 
     def track_communication(self, tensors, role):
@@ -198,6 +201,7 @@ class MemoryAudit:
         history_path = self.evidence.output / f'rank{dist.get_rank()}.paramorph-allocator-history.json'
         history_path.write_text(json.dumps(allocator, indent=2, allow_nan=False) + '\n')
         payload.update(allocator_history_path=str(history_path), allocator_history_max_entries=self.history_limit,
+            allocator_history_context=self.history_context,
             allocator_history_may_be_truncated=any(len(events) >= self.history_limit
                                                   for events in allocator['device_traces']),
             buffer_lifetime_scope='actual_allocator_events_and_observed_transport_tensor_references',

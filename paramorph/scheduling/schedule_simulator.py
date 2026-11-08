@@ -190,6 +190,10 @@ class ScheduleCostEvaluator:
         missing_overlap = set()
         bandwidth_intervals = []
         overlap_intervals = []
+        task_wait_causes = {}
+        pending_resource_waits = {}
+        waits_by_owner = defaultdict(set)
+        resource_waits = defaultdict(list)
         clock = 0.0
 
         def resources(key):
@@ -208,6 +212,12 @@ class ScheduleCostEvaluator:
             row = active.pop(key)
             times[key] = (row['start'], clock)
             completed.add(key)
+            for waiting in waits_by_owner.pop(key, set()):
+                start = pending_resource_waits.pop(waiting)
+                if clock > start:
+                    target, resource, owner = waiting
+                    resource_waits[target].append(dict(task_id=owner, resource=resource,
+                        start_ms=start, end_ms=clock))
             for resource in row['exclusive']:
                 if exclusive_owners.get(resource) != key:
                     raise ValueError('资源感知Replay的排他资源所有权不一致')
@@ -224,8 +234,21 @@ class ScheduleCostEvaluator:
                 started = False
                 for key in sorted(list(ready)):
                     exclusive, shareable = resources(key)
-                    if exclusive & set(exclusive_owners):
+                    blocked = exclusive & set(exclusive_owners)
+                    if blocked:
+                        for resource in blocked:
+                            owner = exclusive_owners[resource]
+                            waiting = (key, resource, owner)
+                            pending_resource_waits.setdefault(waiting, clock)
+                            waits_by_owner[owner].add(waiting)
                         continue
+                    dependency_ready = max((times[parent][1] for parent in predecessors[key]), default=0.0)
+                    task_wait_causes[key] = dict(dependency_ready_ms=dependency_ready,
+                        start_ms=clock, resource_wait_ms=max(0.0, clock - dependency_ready),
+                        dependency_task_ids=sorted(parent for parent in predecessors[key]
+                            if dependency_ready > 0 and math.isclose(times[parent][1], dependency_ready,
+                                rel_tol=0, abs_tol=1e-9)),
+                        resource_blockers=resource_waits[key])
                     causes = [(times[parent][1], parent) for parent in predecessors[key]]
                     causes.extend((times[owner][1], owner) for resource in exclusive
                         if (owner := last_resource_owner.get(resource)) in times)
@@ -285,7 +308,8 @@ class ScheduleCostEvaluator:
                 if count > 1:
                     bandwidth_intervals.append(dict(resource=resource, start_ms=clock,
                         end_ms=interval_end, concurrent_communications=count,
-                        fair_share_fraction=1 / count))
+                        fair_share_fraction=1 / count, task_ids=sorted(key for key in communication_keys
+                            if resource in active[key]['shareable'])))
             for key, row in overlap_rows.items():
                 overlap_intervals.append(dict(compute_task_id=key, start_ms=clock,
                     end_ms=interval_end, **row))
@@ -299,6 +323,7 @@ class ScheduleCostEvaluator:
             for key in sorted(finished):
                 finish(key)
         diagnostics = dict(
+            task_wait_causes=task_wait_causes,
             bandwidth_sharing_intervals=bandwidth_intervals,
             compute_communication_overlap_intervals=overlap_intervals,
             missing_overlap_profiles=[dict(compute_kind=row[0], collective=row[1],

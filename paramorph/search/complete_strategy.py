@@ -12,6 +12,13 @@ COMPLETE_FIELDS = ('tp', 'pp', 'cp', 'dp', 'ep', 'etp', 'vpp', 'micro_batch',
                    'overlap_p2p', 'rank_mapping', 'execution_backend', 'optimizer_sharding')
 
 
+def complete_request(parent, values):
+    submitted = deepcopy(parent)
+    submitted.update(values)
+    submitted['offload'] = float(submitted.get('optimizer_offload_fraction', 0.0)) > 0
+    return submitted
+
+
 def compile_complete_strategy(rewriter, parent, intent):
     intent = RewriteIntent.model_validate(intent)
     if intent.allowed_ranges or intent.module_relations or intent.adjustable:
@@ -22,8 +29,7 @@ def compile_complete_strategy(rewriter, parent, intent):
     missing = [name for name in COMPLETE_FIELDS if name not in intent.values]
     if missing:
         raise ValueError({'missing_complete_fields': missing})
-    submitted = deepcopy(parent)
-    submitted.update(intent.values)
+    submitted = complete_request(parent, intent.values)
     # 原生候选验证检查全部维度、布局、微批和后端条件。
     try:
         rewriter.candidate(submitted)
@@ -37,6 +43,8 @@ def compile_complete_strategy(rewriter, parent, intent):
             return adapter.dump_python(adapter.validate_python(value))
         return value
 
+    if rewrite['request'].get('memory_policy') is not None:
+        rewrite['request']['memory_policy'] = canonical_value('memory_policy', rewrite['request']['memory_policy'])
     changed = {name: dict(submitted=value, compiled=rewrite['request'][name])
         for name, value in intent.values.items()
         if canonical_value(name, rewrite['request'][name]) != canonical_value(name, value)}

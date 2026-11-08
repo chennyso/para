@@ -1,3 +1,5 @@
+from functools import lru_cache
+import json
 import math
 import statistics
 from copy import deepcopy
@@ -154,20 +156,26 @@ class TopologyAwareNCCLCostSurface:
         return {key: str(value) for key, value in environment.items()
                 if (key.startswith('NCCL_') and key not in ignored) or key in cuda_runtime or key.startswith('UCX_')}
 
+    @classmethod
+    def _devices(cls, topology):
+        rows = tuple((row.get('physical_rank', row.get('rank')),
+            str(row.get('uuid', row.get('gpu_uuid'))) if row.get('uuid', row.get('gpu_uuid')) else None,
+            row.get('node', topology.get('hostname')), row.get('node_index'), row.get('numa_node'),
+            row.get('pci_bus_id'), json.dumps(row['pci_path'], sort_keys=True)
+                if row.get('pci_path') is not None else None) for row in topology['devices'])
+        return cls._normalized_devices(rows)
+
     @staticmethod
-    def _devices(topology):
+    @lru_cache(maxsize=256)
+    def _normalized_devices(rows):
         devices = {}
-        for row in topology['devices']:
-            rank = row.get('physical_rank', row.get('rank'))
-            identifier = row.get('uuid', row.get('gpu_uuid'))
+        for rank, identifier, node, node_index, numa_node, pci_bus_id, pci_path in rows:
             if type(rank) is not int or rank < 0 or rank in devices or not identifier:
                 raise ValueError('通信设备身份需要明确且唯一的物理Rank和真实GPU UUID')
             identifier = str(UUID(str(identifier).removeprefix('GPU-')))
-            devices[rank] = dict(uuid=identifier, node=row.get('node', topology.get('hostname')),
-                node_index=row.get('node_index'),
-                numa_node=row.get('numa_node'),
-                pci_bus_id=str(row['pci_bus_id']).lower() if row.get('pci_bus_id') else None,
-                pci_path=row.get('pci_path'))
+            devices[rank] = dict(uuid=identifier, node=node, node_index=node_index,
+                numa_node=numa_node, pci_bus_id=str(pci_bus_id).lower() if pci_bus_id else None,
+                pci_path=json.loads(pci_path) if pci_path is not None else None)
         if len({row['uuid'] for row in devices.values()}) != len(devices):
             raise ValueError('同一真实GPU UUID不能对应多个物理设备')
         return devices
@@ -590,13 +598,30 @@ class TopologyAwareNCCLCostSurface:
         dtype_transfer_matches = []
         ratio_calibrated_matches = []
         if mode != 'analytical_only':
-            for profile in self.database.communication_profiles():
+            profiles = self.database.communication_profiles()
+            exact_groups, topology_groups = {}, {}
+
+            def exact_group(profile, measured_ranks):
+                key = (profile['id'], tuple(measured_ranks))
+                if key not in exact_groups:
+                    exact_groups[key] = self._group_matches(topology_identity,
+                        ranks, profile['benchmark'], measured_ranks)
+                return exact_groups[key]
+
+            def topology_group(profile, measured_ranks):
+                key = (profile['id'], tuple(measured_ranks))
+                if key not in topology_groups:
+                    topology_groups[key] = self._measured_topology_class(
+                        topology_identity, profile['benchmark'], measured_ranks)
+                return topology_groups[key]
+
+            for profile in profiles:
                 benchmark = profile['benchmark']
                 rows = [row for row in benchmark['records']
                         if row.get('collective', row.get('kind')) == collective
                         and row.get('concurrent_operations',
                             benchmark.get('concurrent_operations', [])) == list(concurrency)
-                        and self._group_matches(topology_identity, ranks, benchmark, row['ranks'])
+                        and exact_group(profile, row['ranks'])
                         and row.get('dtype', benchmark.get('dtype', 'bfloat16')) == dtype
                         and _measured_distribution_matches(row, collective, payload_bytes, matrix)]
                 if not rows:
@@ -627,7 +652,7 @@ class TopologyAwareNCCLCostSurface:
                 continue
             requested_class = self._group_topology_class(topology_identity, ranks)
             if requested_class is not None:
-                for profile in self.database.communication_profiles():
+                for profile in profiles:
                     benchmark = profile['benchmark']
                     if not self._cluster_matches(topology_identity, benchmark):
                         continue
@@ -635,8 +660,7 @@ class TopologyAwareNCCLCostSurface:
                         if row.get('collective', row.get('kind')) == collective
                         and row.get('concurrent_operations',
                             benchmark.get('concurrent_operations', [])) == list(concurrency)
-                        and self._measured_topology_class(
-                            topology_identity, benchmark, row['ranks']) == requested_class
+                        and topology_group(profile, row['ranks']) == requested_class
                         and row.get('dtype', benchmark.get('dtype', 'bfloat16')) == dtype
                         and _measured_distribution_matches(row, collective, payload_bytes, matrix)]
                     if not rows:
@@ -667,7 +691,7 @@ class TopologyAwareNCCLCostSurface:
                         resource_ids=estimate['resource_ids'], dependencies=[])]
                     topology_class_matches.append(estimate)
             if requested_class is not None:
-                for profile in self.database.communication_profiles():
+                for profile in profiles:
                     benchmark = profile['benchmark']
                     if not self._cluster_matches(topology_identity, benchmark):
                         continue
@@ -675,8 +699,7 @@ class TopologyAwareNCCLCostSurface:
                         if row.get('collective', row.get('kind')) == collective
                         and row.get('concurrent_operations',
                             benchmark.get('concurrent_operations', [])) == list(concurrency)
-                        and self._measured_topology_class(
-                            topology_identity, benchmark, row['ranks']) == requested_class
+                        and topology_group(profile, row['ranks']) == requested_class
                         and row.get('dtype', benchmark.get('dtype', 'bfloat16')) != dtype
                         and _measured_distribution_matches(row, collective, payload_bytes, matrix)]
                     if not rows:
@@ -715,7 +738,7 @@ class TopologyAwareNCCLCostSurface:
                         duration_ms=estimate['milliseconds'],
                         resource_ids=estimate['resource_ids'], dependencies=[])]
                     dtype_transfer_matches.append(estimate)
-            for profile in self.database.communication_profiles():
+            for profile in profiles:
                 benchmark = profile['benchmark']
                 if not self._cluster_matches(topology_identity, benchmark):
                     continue

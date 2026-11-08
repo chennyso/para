@@ -131,8 +131,9 @@ class SeedPlanner:
                         optimizer_offload_fraction=float(fraction), optimizer_transfer_overlap=True))
         strategies = tuple(request.get('fsdp_supported_sharding_strategies',
             ('optim_grads_params',)))
-        expert_strategies = tuple(request.get('fsdp_supported_expert_sharding_strategies',
-            ('no_shard',))) if is_moe else ('no_shard',)
+        expert_strategies = tuple(request.get('fsdp_supported_expert_sharding_strategies', ('no_shard',)))
+        if not is_moe and expert_strategies:
+            expert_strategies = ('no_shard',) if 'no_shard' in expert_strategies else expert_strategies[:1]
         precision_values = (bool(request.get('precision_aware_optimizer', False)),)
         for dense in strategies if 'megatron_fsdp' in allowed_backends else ():
             for expert in expert_strategies:
@@ -175,9 +176,11 @@ class SeedPlanner:
                             checkpoint_format='fsdp_dtensor'))
         for variant in variants:
             if variant['execution_backend'] == 'megatron_fsdp':
-                variant['megatron_fsdp_main_params_dtype'] = 'float32'
-                variant['megatron_fsdp_main_grads_dtype'] = request.get('main_grads_dtype',
-                    'bfloat16' if variant['precision_aware_optimizer'] else 'float32')
+                variant['megatron_fsdp_main_params_dtype'] = (
+                    request.get('megatron_fsdp_main_params_dtype') or request.get('main_params_dtype', 'float32'))
+                variant['megatron_fsdp_main_grads_dtype'] = (
+                    request.get('megatron_fsdp_main_grads_dtype') or request.get('main_grads_dtype',
+                    'bfloat16' if variant['precision_aware_optimizer'] else 'float32'))
         return variants
 
     def global_families(self, request):
@@ -198,7 +201,7 @@ class SeedPlanner:
                         continue
                     for etp in expert_tensor_values:
                         for ep in expert_values:
-                            if model.num_experts is None and (etp != tp or ep != 1):
+                            if model.num_experts is None and (etp not in (1, tp) or ep != 1):
                                 continue
                             expert_denominator = etp * ep * pp
                             if world % expert_denominator:
@@ -209,6 +212,9 @@ class SeedPlanner:
                             for mapping in mappings:
                                 for state in self.state_families(request, dp * cp, expert_dp,
                                         model.num_experts is not None):
+                                    if model.num_experts is None and etp != (
+                                            1 if state['execution_backend'] == 'megatron_fsdp' else tp):
+                                        continue
                                     candidate = dict(request, tp=tp, pp=pp, cp=cp, dp=dp,
                                         ep=ep, etp=etp, expert_dp=expert_dp, vpp=1,
                                         micro_batch=1, group=1, pipeline_schedule='1f1b',

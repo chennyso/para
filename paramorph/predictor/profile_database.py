@@ -3,7 +3,9 @@ import json
 import math
 import sqlite3
 import statistics
+from dataclasses import asdict
 from pathlib import Path
+from core_data_models import MemoryPolicy
 
 from .measured_modules import annotate_measurement_semantics
 
@@ -26,7 +28,7 @@ EXECUTION_FIELDS += ('execution_backend', 'fsdp_sharding_strategy', 'dense_shard
     'fsdp_bucket_elements', 'checkpoint_format', 'checkpoint_reshard', 'optimizer_checkpoint_mode')
 EXECUTION_FIELDS += ('pipeline_dtype', 'sequence_parallel', 'clip_grad')
 EXECUTION_FIELDS += ('main_grads_dtype', 'main_params_dtype', 'exp_avg_dtype', 'exp_avg_sq_dtype')
-PROFILE_SIGNATURE_REVISION = 'native_backend_cuda_connection_defaults_v3'
+PROFILE_SIGNATURE_REVISION = 'native_backend_execution_defaults_v4'
 
 
 def resolved_cuda_connections(request):
@@ -44,10 +46,37 @@ def resolved_clip_grad(request):
     return float(value)
 
 
+def resolved_bucket_elements(request):
+    value = request.get('bucket_elements')
+    if value is None:
+        value = max(40000000, 1000000 * request['dp'])
+    if type(value) is not int or value <= 0:
+        raise ValueError('梯度Bucket元素数量必须为正整数')
+    return value
+
+
 def normalized_execution(request):
     resolved = {key: request.get(key) for key in EXECUTION_FIELDS}
+    if 'fp16_bounded_adam_sha256' in request:
+        resolved['fp16_bounded_adam_sha256'] = request['fp16_bounded_adam_sha256']
+    if 'optimizer_schedule' in request:
+        resolved['optimizer_schedule'] = request['optimizer_schedule']
+        resolved['optimizer_hyperparameters'] = request['optimizer_hyperparameters']
+    if request.get('native_uniform_pipeline_layout', False):
+        resolved['native_uniform_pipeline_layout'] = True
+    if 'training_data_contract' in request:
+        resolved['training_data_contract'] = request['training_data_contract']
+    if request.get('record_native_schedule'):
+        overlap = request.get('overlap_p2p', False)
+        resolved['batch_p2p_comm'] = request.get('batch_p2p_comm', not overlap)
+        resolved['overlap_p2p_comm_warmup_flush'] = request.get('overlap_p2p_comm_warmup_flush', False)
+    if request.get('gpus_per_worker', request['gpus_per_node']) != request['gpus_per_node']:
+        resolved['gpus_per_worker'] = request['gpus_per_worker']
+    if request.get('memory_policy') is not None:
+        resolved['memory_policy'] = asdict(MemoryPolicy(**request['memory_policy']))
     resolved['optimizer'] = request.get('optimizer', 'adam')
     resolved['clip_grad'] = resolved_clip_grad(request)
+    resolved['bucket_elements'] = resolved_bucket_elements(request)
     resolved['cuda_device_max_connections'] = resolved_cuda_connections(request)
     world = request['node_count'] * request['gpus_per_node']
     resolved['etp'] = request.get('etp', request['tp'])
@@ -56,6 +85,13 @@ def normalized_execution(request):
     resolved['pipeline_schedule'] = request.get('pipeline_schedule', 'interleaved_1f1b' if request['vpp'] > 1 else '1f1b')
     resolved['optimizer_sharding'] = request.get('optimizer_sharding', 'distributed')
     resolved['optimizer_offload_fraction'] = float(request.get('optimizer_offload_fraction', 0.0))
+    if resolved['optimizer_offload_fraction'] > 0 and request.get('optimizer_pin_cpu_params') is False:
+        resolved['optimizer_pin_cpu_params'] = False
+    if resolved['optimizer_offload_fraction'] > 0 and request.get('optimizer_cpu_copy_mode') is not None:
+        resolved['optimizer_cpu_copy_mode'] = request['optimizer_cpu_copy_mode']
+    if request.get('pinned_host_allocator') is not None:
+        resolved['pinned_host_allocator'] = request['pinned_host_allocator']
+        resolved['pinned_host_register_threads'] = request['pinned_host_register_threads']
     resolved['optimizer_transfer_overlap'] = bool(request.get('optimizer_transfer_overlap', False))
     resolved['precision'] = request.get('precision', 'bfloat16').removeprefix('torch.')
     resolved['precision_aware_optimizer'] = bool(request.get('precision_aware_optimizer', False))
@@ -200,8 +236,24 @@ class ProfileDatabase:
         self.connection.commit()
 
     def communication_profiles(self):
-        return [dict(id=identifier, benchmark=json.loads(encoded)) for identifier, encoded
+        generation = (self.connection.total_changes,
+            self.connection.execute('PRAGMA data_version').fetchone()[0])
+        cached = getattr(self, '_communication_profile_cache', None)
+        if cached is None or cached[0] != generation:
+            records = [dict(id=identifier, benchmark=json.loads(encoded)) for identifier, encoded
                 in self.connection.execute('SELECT id, document FROM communication_profiles ORDER BY id')]
+            self._communication_profile_cache = (generation, records)
+        return self._communication_profile_cache[1]
+
+    def measured_profiles(self):
+        generation = (self.connection.total_changes,
+            self.connection.execute('PRAGMA data_version').fetchone()[0])
+        cached = getattr(self, '_measured_profile_cache', None)
+        if cached is None or cached[0] != generation:
+            records = [(identifier, json.loads(encoded)) for identifier, encoded in
+                self.connection.execute('SELECT id, document FROM profiles ORDER BY id')]
+            self._measured_profile_cache = (generation, records)
+        return [(identifier, dict(profile)) for identifier, profile in self._measured_profile_cache[1]]
 
     def add_overlap(self, identifier, benchmark):
         if benchmark['source'] != 'real_gpu_compute_communication_microbenchmark':

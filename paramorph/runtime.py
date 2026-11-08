@@ -414,7 +414,8 @@ class RuntimeEvidence:
         self.bucket_calibration = dict(schema_version=1, rank=self.rank, request=self.request,
             source=('actual_deployed_DDP_bucket_objects_and_collective_dispatch' if calibrate
                 else 'actual_deployed_DDP_bucket_objects'),
-            event_capture_scope='multi_rank_collective_groups', groups=[], events=[])
+            event_capture_scope='multi_rank_collective_groups', groups=[], events=[],
+            no_op_parameter_sync={})
         models = models if isinstance(models, (list, tuple)) else [models]
         objects, parameter_names, identifiers = [], {}, {}
         for vp, model in enumerate(models):
@@ -481,9 +482,20 @@ class RuntimeEvidence:
                     before = time.perf_counter_ns()
                     region = None if self.active_region is None else dict(self.active_region)
                     dispatched = current.param_gather_dispatched
+                    param_handle = current.param_gather_handle is not None
                     grad_handle = current.grad_reduce_handle is not None
                     result = original(*args, **kwargs)
                     if self.step >= 0:
+                        elapsed = time.perf_counter_ns() - before
+                        no_op = (name == 'start_param_sync' and dispatched and not args and not kwargs
+                            or name == 'finish_param_sync' and dispatched and not param_handle)
+                        if no_op:
+                            key = f'{self.step}:{group_id}:{name}'
+                            summary = self.bucket_calibration['no_op_parameter_sync'].setdefault(
+                                key, dict(count=0, total_host_nanoseconds=0))
+                            summary['count'] += 1
+                            summary['total_host_nanoseconds'] += elapsed
+                            return result
                         self.bucket_calibration['events'].append(dict(step=self.step,
                             group_id=group_id, operation=name, host_start_ns=before,
                             host_end_ns=time.perf_counter_ns(), active_region=region,
@@ -493,6 +505,8 @@ class RuntimeEvidence:
                             is_first_batch=current.is_first_batch,
                             param_gather_dispatched_before=dispatched,
                             param_gather_dispatched_after=current.param_gather_dispatched,
+                            param_handle_before=param_handle,
+                            param_handle_after=current.param_gather_handle is not None,
                             grad_handle_before=grad_handle,
                             grad_handle_after=current.grad_reduce_handle is not None,
                             force_sync=bool(kwargs.get('force_sync', False)),

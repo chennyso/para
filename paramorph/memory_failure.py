@@ -31,6 +31,8 @@ def _rank(text):
 
 def _phase(text):
     lower = text.lower()
+    if 'param_and_grad_buffer.py' in lower and 'self.grad_data = torch.zeros(' in lower:
+        return 'initialization', 'LOAD_OOM'
     if any(value in lower for value in ('load_checkpoint', 'load_state_dict', 'checkpoint load',
             'pretrained_checkpoint', 'dist_checkpointing')):
         return 'checkpoint_load', 'LOAD_OOM'
@@ -41,6 +43,12 @@ def _phase(text):
             'forward_backward', 'backward')):
         return 'forward_backward', 'TRAIN_OOM'
     return 'initialization', 'LOAD_OOM'
+
+
+def oom_allocation_site(text):
+    if 'param_and_grad_buffer.py' in text and 'self.grad_data = torch.zeros(' in text:
+        return 'ddp_gradient_buffer_initialization'
+    return None
 
 
 def memory_failure_witness(result, plan, directory, prediction=None, world_size=None):
@@ -90,6 +98,7 @@ def memory_failure_witness(result, plan, directory, prediction=None, world_size=
         device_free_bytes=free, process_device_used_bytes=process_used,
         host_memory_bytes=None, gpu_allocation_seconds=result['gpu_allocation_seconds'],
         gpu_hours=gpu_hours, status=status, phase=phase,
+        allocation_site=oom_allocation_site(excerpt),
         source_log=str(path), source='actual_runtime_exception')
     witness = dict(witness_id='', run_id=result['run_id'], status=status,
         complete_plan=plan, observed=observed,

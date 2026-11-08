@@ -38,6 +38,25 @@ python paramorph/experiments/run_system_search.py \
   --output search-output --method full --no-gpu
 ```
 
+有图和无图复测使用两份独立配置，分别设置 `agent_ablation` 为
+`full` 和 `without_dag_evidence`。两份配置共用模型、硬件、初始实测、
+后端合法性检查及预算，使用不同的输出目录。设置
+`selection_policy: "investigation"`、`single_decision_round: true` 和
+`budgeted_investigation_enabled: true`，可以由 Agent 比较所有调查提出的
+候选并选择下一项实验。逐轮回执记录完整生效配置、选择依据、预测不确定性和
+实际 GPU·小时。GPU 锁等待时间单独记录。Megatron 训练回执保存实际执行的
+微批调度表和 P2P 配置；缺少匹配的成本证据时，预计收益保留为空。
+
+以下验证脚本读取历史 MiMo、Falcon 和 FSDP 回执，以及新共同基线的逐 Rank
+调度记录：
+
+```bash
+export PYTHONPATH="$PWD/paramorph:$PWD/integration:$PYTHONPATH"
+python paramorph/tests/verify_budgeted_schedule_receipts.py \
+  --archive /path/to/overnight-results \
+  --native-run /path/to/qwen14/common/training/runs/run-id
+```
+
 ## 主要数据
 
 | 路径 | 内容 |

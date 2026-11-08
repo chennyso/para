@@ -3,6 +3,26 @@ from pydantic import Field
 from contracts import Contract
 
 
+def validate_attention_capability(workload, model_config, topology):
+    capability = workload.get('attention_backend_capabilities')
+    if capability is None:
+        return
+    required = ('source', 'runtime_source_sha256', 'image_digest', 'device_name',
+        'q_head_dim', 'v_head_dim', 'failure_run_ids', 'mla_context_parallel_supported')
+    if any(key not in capability for key in required) or not capability['failure_run_ids']:
+        raise ValueError('Attention能力记录需要实际运行来源和完整后端身份')
+    q_head = model_config.get('qk_nope_head_dim', 0) + model_config.get('qk_rope_head_dim', 0)
+    if q_head != capability['q_head_dim'] or model_config.get('v_head_dim') != capability['v_head_dim']:
+        raise ValueError('Attention能力记录与当前模型维度不同')
+    if not topology.devices or any(device['name'] != capability['device_name'] for device in topology.devices):
+        raise ValueError('Attention能力记录与当前GPU型号不同')
+    if workload.get('cp', 1) > 1 and capability['mla_context_parallel_supported'] is False:
+        raise ValueError(dict(status='CONSTRAINT_CONFLICT', conflicts=['context_parallel_attention_backend'],
+            revision_owner='JointStrategyAgent',
+            reason='当前GPU和Attention后端不支持该MLA维度的Context Parallel训练',
+            backend_evidence=capability))
+
+
 def tensor_parallel_limit(workload, model_name=''):
     world = workload.get('node_count', 1) * workload.get('gpus_per_node', 4)
     if type(world) is not int or world < 1:
@@ -28,6 +48,7 @@ class Capability(Contract):
 class CapabilityRegistry:
     def __init__(self, model_config):
         self.model_config = model_config
+        self.attention_capabilities = None
         supported = {
             'RepartitionRegion': ('Region连续区间及PP/VPP归属', 'ProgramAgent.lower_native'),
             'SetPipelineLayout': ('完整PP/VPP分区与原生交错调度表', 'ProgramAgent.compile'),
@@ -63,15 +84,22 @@ class CapabilityRegistry:
         divisors = [value for value in range(1, topology.num_gpus + 1)
                     if topology.num_gpus % value == 0]
         maximum_tp = tensor_parallel_limit(workload, model.name)
+        mamba_groups = self.model_config.get('mamba_n_groups')
         hybrid = any(kind.value in ('attention_mamba_composite', 'mamba', 'gdn') for kind in model.layer_types)
+        attention = workload.get('attention_backend_capabilities')
+        if attention is not None:
+            validate_attention_capability(dict(workload, cp=1), self.model_config, topology)
+        self.attention_capabilities = attention
+        supported_cp = not attention or attention['mla_context_parallel_supported'] is not False
         return dict(tp=[value for value in divisors
                         if value <= maximum_tp and model.num_attention_heads % value == 0
                         and model.hidden_size % value == 0
+                        and (mamba_groups is None or mamba_groups % value == 0)
                         and (model.num_query_groups or model.num_attention_heads) % value == 0],
             etp=[value for value in divisors if value <= maximum_tp and model.hidden_size % value == 0 and
                  (model.ffn_hidden_size is None or model.ffn_hidden_size % value == 0)],
             pp=[value for value in divisors if value <= model.num_layers], dp=divisors, expert_dp=divisors,
-            cp=[1] if hybrid else [value for value in divisors
+            cp=[1] if hybrid or not supported_cp else [value for value in divisors
                 if value == 1 or workload['sequence'] % (2 * value) == 0],
             ep=[value for value in divisors if model.num_experts is not None and model.num_experts % value == 0] or [1],
             vpp=list(range(1, model.num_layers + 1)),

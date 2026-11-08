@@ -180,6 +180,46 @@ class BottleneckGraph:
             resources=row.get('resources', row.get('resource_requirements', [])),
             evidence_ref=evidence, inclusion_reasons=reasons)
 
+    def causal_closure(self, seed_task_ids, replay, dependency_depth=1):
+        if type(dependency_depth) is not int or dependency_depth < 0:
+            raise ValueError('阻塞关系展开深度必须为非负整数')
+        seeds = self._validate_task_ids(seed_task_ids)
+        diagnostics = replay['resource_diagnostics']
+        waits = diagnostics['task_wait_causes']
+        related = defaultdict(lambda: defaultdict(set))
+        for key, row in waits.items():
+            related[key]['dependency_ready'].update(row['dependency_task_ids'])
+            related[key]['exclusive_resource_wait'].update(item['task_id'] for item in row['resource_blockers'])
+        for row in diagnostics['bandwidth_sharing_intervals']:
+            for key in row['task_ids']:
+                related[key]['bandwidth_sharing'].update(set(row['task_ids']) - {key})
+        for row in diagnostics['compute_communication_overlap_intervals']:
+            if row['gamma'] > 1:
+                related[row['compute_task_id']]['compute_communication_slowdown'].update(row['communication_task_ids'])
+        selected = set(seeds)
+        reasons = {key: {'seed'} for key in seeds}
+        frontier = set(seeds)
+        for depth in range(dependency_depth + 1):
+            following = set()
+            for key in frontier:
+                peers = self.collective_tasks.get(self.collective_keys.get(key), set())
+                connections = dict(collective_participant=peers)
+                if depth < dependency_depth:
+                    connections.update(related[key])
+                for reason, identities in connections.items():
+                    for identity in identities:
+                        reasons.setdefault(identity, set()).add(reason)
+                        if identity not in selected:
+                            selected.add(identity)
+                            following.add(identity)
+            frontier = following
+        boundary = sorted({parent for key in selected for parent in self.predecessors[key] if parent not in selected})
+        return dict(graph_id=self.graph_id, seed_task_ids=sorted(seeds), task_ids=sorted(selected),
+            inclusion_reasons={key: sorted(reasons[key]) for key in selected},
+            boundary_dependency_ids=boundary, scope='replayed_blocking_relations',
+            closure_id=_identity(dict(graph=self.graph_id, seeds=sorted(seeds),
+                selected=sorted(selected), depth=dependency_depth, scope='replayed_blocking_relations')))
+
     @staticmethod
     def _bounded_page(header, rows, offset, limit, max_chars, row_name):
         if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 128:
@@ -252,14 +292,17 @@ class BottleneckGraph:
         while end is not None:
             critical.append(end)
             end = critical_parent[end]
-        return dict(step_time_ms=step, critical_task_ids=list(reversed(critical)),
+        return dict(graph_id=self.graph_id, resource_model_id=_identity(resource_model or {}),
+            step_time_ms=step, critical_task_ids=list(reversed(critical)),
             task_times=times, resource_diagnostics=diagnostics)
 
-    def epsilon_impact(self, task_ids, epsilon, config=None, resource_model=None):
+    def epsilon_impact(self, task_ids, epsilon, config=None, resource_model=None, baseline_replay=None):
         selected = self._validate_task_ids(task_ids)
         if type(epsilon) not in (int, float) or not math.isfinite(epsilon) or not 0 < epsilon <= 1:
             raise ValueError('反事实epsilon必须处于(0,1]')
-        before = self.replay(config=config, resource_model=resource_model)
+        before = baseline_replay or self.replay(config=config, resource_model=resource_model)
+        if before['graph_id'] != self.graph_id or before['resource_model_id'] != _identity(resource_model or {}):
+            raise ValueError('目标任务敏感性需要相同执行图与资源模型的参照回放')
         overrides = {key: (1 - epsilon) * self.records[key]['duration_ms'] for key in selected}
         after = self.replay(overrides, config=config, resource_model=resource_model)
         return dict(graph_id=self.graph_id, selected_task_ids=sorted(selected), epsilon=epsilon,
@@ -267,7 +310,9 @@ class BottleneckGraph:
             impact_ms=before['step_time_ms'] - after['step_time_ms'],
             baseline_critical_task_ids=before['critical_task_ids'],
             counterfactual_critical_task_ids=after['critical_task_ids'],
-            replay_count=2, evidence_refs=list(self.evidence_refs),
+            replay_count=1 if baseline_replay is not None else 2,
+            target_wait_causes={key: before['resource_diagnostics']['task_wait_causes'][key] for key in selected},
+            evidence_refs=list(self.evidence_refs),
             resource_model_id=_identity(resource_model or {}),
             evidence_type='predicted_counterfactual', measured_strategy_gain=False,
             scope='selected_task_duration_scaling_with_unchanged_full_dag_resources_and_dependencies')

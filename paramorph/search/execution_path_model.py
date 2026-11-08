@@ -6,6 +6,7 @@ import networkx as nx
 
 class ExecutionPathModel:
     def __init__(self, request, profile, graph):
+        self.coefficient_scale = 10000
         self.slots = len(request['decoder_chunks'])
         self.prefix = {phase: list(accumulate((int(round(1000 * profile['layers'][str(index)][phase + '_ms']))
             for index in range(sum(request['decoder_chunks']))), initial=0))
@@ -51,6 +52,7 @@ class ExecutionPathModel:
         heads, tails, forward_counts, backward_counts = {}, {}, {}, {}
         duration = {key: task['end_ms'] - task['start_ms'] for key, task in tasks.items()}
         edges = list(accumulate(request['decoder_chunks'], initial=0))
+        baseline_costs = self.costs(request['decoder_chunks'])
         units = {}
         for key, task in tasks.items():
             coefficients = [0] * (2 * self.slots)
@@ -59,7 +61,18 @@ class ExecutionPathModel:
                 if (type(slot) is not int or not 0 <= slot < self.slots
                         or task['metadata']['layer_ids'] != list(range(edges[slot], edges[slot + 1]))):
                     raise ValueError('执行路径任务与完整模块区间不一致')
-                coefficients[slot + (self.slots if task['kind'] == 'backward_compute' else 0)] = 1
+                if duration[key] > 0:
+                    coefficients[slot + (self.slots if task['kind'] == 'backward_compute' else 0)] = self.coefficient_scale
+            elif (task['kind'] == 'cuda_kernel' and task['metadata'].get('logical_layer') is not None
+                    and task['metadata'].get('operation') in ('forward_compute', 'backward_compute')):
+                slot = task['region']
+                layer = task['metadata']['logical_layer']
+                if type(slot) is not int or not 0 <= slot < self.slots or not edges[slot] <= layer < edges[slot + 1]:
+                    raise ValueError('层级执行路径与原始模块区间不一致')
+                index = slot + (self.slots if task['metadata']['operation'] == 'backward_compute' else 0)
+                if baseline_costs[index] <= 0:
+                    raise ValueError('层级执行路径需要正数的区域成本')
+                coefficients[index] = int(round(self.coefficient_scale * duration[key] * 1000 / baseline_costs[index]))
             units[key] = coefficients
         for key in order:
             parent = max(dag.predecessors(key), key=lambda value: heads[value], default=None)
@@ -74,12 +87,11 @@ class ExecutionPathModel:
         raw = max(task['end_ms'] for task in tasks.values())
         if abs(max(heads.values()) - raw) > 1e-4:
             raise ValueError('资源依赖没有重建完整参照执行时间')
-        baseline_costs = self.costs(request['decoder_chunks'])
         cuts = {}
         for middle in order:
             coefficients = [a + b - c for a, b, c in zip(forward_counts[middle], backward_counts[middle], units[middle])]
             path_time = heads[middle] + tails[middle] - duration[middle]
-            constant = int(round(1000 * path_time)) - sum(
+            constant = int(round(1000 * self.coefficient_scale * path_time)) - sum(
                 coefficient * cost for coefficient, cost in zip(coefficients, baseline_costs))
             identity = tuple(coefficients)
             if identity not in cuts or cuts[identity] < constant:
@@ -89,7 +101,7 @@ class ExecutionPathModel:
     def score(self, counts):
         costs = self.costs(counts)
         return max(constant + sum(a * b for a, b in zip(coefficients, costs))
-            for coefficients, constant in self.cuts) / 1000
+            for coefficients, constant in self.cuts) / (1000 * self.coefficient_scale)
 
     def attach(self, model, variables):
         if len(variables) != self.slots * 2:
@@ -97,15 +109,17 @@ class ExecutionPathModel:
         bounds = [self.prefix[phase][-1] for phase in ('forward', 'backward') for _ in range(self.slots)]
         upper = max(max(0, constant) + sum(a * b for a, b in zip(coefficients, bounds))
             for coefficients, constant in self.cuts)
-        objective = model.new_int_var(0, upper, 'path_span')
+        objective = model.new_int_var(0, (upper + self.coefficient_scale - 1) // self.coefficient_scale,
+            'path_span')
         for coefficients, constant in self.cuts:
-            model.add(objective >= constant + sum(coefficient * variable
+            model.add(objective * self.coefficient_scale >= constant + sum(coefficient * variable
                 for coefficient, variable in zip(coefficients, variables)))
         return objective
 
     def summary(self):
         return dict(path_count=len(self.cuts), graph_tasks=self.graph_tasks,
             resource_edges=self.resource_edges, reference_raw_ms=self.raw_step_ms,
+            coefficient_scale=self.coefficient_scale,
             objective_scope='observed_schedule_path_surrogate_full_DAG_selects_candidates')
 
     def influence(self, request):
@@ -127,7 +141,7 @@ class ExecutionPathModel:
         ordered = sorted(self.cuts, key=lambda cut: cut[1] + sum(a * b for a, b in zip(cut[0], costs)), reverse=True)
         return dict(self.summary(), boundary_columns=['boundary', 'shift', 'module_id', 'source_virtual',
             'target_virtual', 'predicted_path_change_ms'], boundary_effects=effects,
-            longest_observed_paths=[dict(forward_counts=coefficients[:self.slots],
-                backward_counts=coefficients[self.slots:],
-                baseline_path_ms=(constant + sum(a * b for a, b in zip(coefficients, costs))) / 1000)
+            longest_observed_paths=[dict(forward_weights=[value / self.coefficient_scale for value in coefficients[:self.slots]],
+                backward_weights=[value / self.coefficient_scale for value in coefficients[self.slots:]],
+                baseline_path_ms=(constant + sum(a * b for a, b in zip(coefficients, costs))) / (1000 * self.coefficient_scale))
                 for coefficients, constant in ordered[:4]])

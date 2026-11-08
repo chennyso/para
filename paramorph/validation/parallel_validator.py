@@ -37,6 +37,11 @@ class ParallelValidator:
         if config.pp == 1 and config.vpp > 1:
             errors.append('当前Megatron虚拟Pipeline初始化要求PP至少为两个阶段')
         request = dict(config.execution_implementation)
+        overlap = request.get('overlap_p2p') is True
+        if overlap and (config.vpp == 1 or request.get('batch_p2p_comm') is True):
+            errors.append('P2P重叠需要交错流水线且不能同时使用批量P2P通信')
+        if request.get('overlap_p2p_comm_warmup_flush') is True and not overlap:
+            errors.append('预热和收尾P2P重叠要求启用P2P重叠')
         if request.get('recompute') == 'selective-mlp' and self.model_spec.num_experts:
             errors.append('当前selective-mlp入口只验证稠密MLP；MoE使用selective并显式选择原生模块')
         if request.get('recompute') == 'selective':

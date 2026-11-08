@@ -6,6 +6,7 @@ import time
 from contracts import ModuleRelation, RewriteIntent, fingerprint
 from cost.runtime_calibration import configuration
 from graph.process_groups import process_groups
+from graph.native_recomputation import selective_modules
 from predictor.profile_database import backend_reuse_evidence, normalized_execution, plan_signature, same_training_plan, signature
 from predictor.measured_modules import annotate_measurement_semantics, compute_profile_quality, enrich_module_profile
 from predictor.state_sharding import parameter_state_ownership, state_sharding_errors
@@ -23,7 +24,8 @@ LAYOUT_FIELDS = ('vpp', 'micro_batch', 'group', 'decoder_chunks', 'recompute',
 STATE_FIELDS = tuple(name for name in SeedPlanner.family_fields() if name not in GLOBAL_FIELDS)
 REWRITE_FIELDS = GLOBAL_FIELDS + LAYOUT_FIELDS + STATE_FIELDS + (
     'fsdp_sharding_strategy', 'fsdp_unit', 'fsdp_prefetch', 'fsdp_prefetch_distance',
-    'fsdp_reshard_after_forward', 'fsdp_double_buffer', 'fsdp_bucket_elements', 'bucket_elements', 'memory_policy')
+    'fsdp_reshard_after_forward', 'fsdp_double_buffer', 'fsdp_bucket_elements', 'bucket_elements',
+    'optimizer_pin_cpu_params', 'memory_policy')
 COMPUTE_FIELDS = ('model', 'checkpoint', 'tp', 'cp', 'ep', 'etp', 'micro_batch', 'memory_policy',
     'sequence', 'precision', 'pipeline_dtype', 'recompute', 'attention_backend',
     'sequence_parallel', 'backend_fingerprint', 'hardware_fingerprint',
@@ -159,6 +161,7 @@ class ConditionalPartitionSolver:
 
     def _layouts(self, parent, global_values, fixed, allowed_ranges):
         base = dict(parent, **global_values)
+        base.update({name: value for name, value in fixed.items() if name not in GLOBAL_FIELDS})
         model, domains = self.rewriter.model, self.rewriter.domains
         states = SeedPlanner.state_families(base, base['dp'] * base['cp'],
             base['expert_dp'], model.num_experts is not None)
@@ -180,6 +183,9 @@ class ConditionalPartitionSolver:
                 ('micro_batch', [base['micro_batch']]),
                 ('recompute', [base['recompute'], 'none', 'full', 'selective-mlp'])):
             values = list(domains.get(name, default))
+            if name == 'recompute' and 'selective' in allowed_ranges.get(name, []):
+                if selective_modules(model) and 'selective' not in values:
+                    values.append('selective')
             if name in allowed_ranges:
                 values = [value for value in values if value in allowed_ranges[name]]
             if name in fixed:
@@ -208,6 +214,13 @@ class ConditionalPartitionSolver:
                             if key != 'decoder_chunks'):
                         continue
                     if request.get('memory_policy') is not None:
+                        if recompute == 'selective' and not request['memory_policy'].get('recompute_modules'):
+                            modules = selective_modules(model)
+                            if not modules:
+                                rejections.append(dict(values=dict(recompute=recompute, memory_policy=request['memory_policy']),
+                                    reasons=['后端没有支持的选择性重计算模块']))
+                                continue
+                            request['memory_policy'] = dict(request['memory_policy'], recompute_modules=[next(iter(modules))])
                         request['memory_policy'] = dict(request['memory_policy'],
                             recompute_granularity='full' if recompute == 'full' else
                             'selective' if recompute in ('selective-mlp', 'selective') else None,
@@ -465,7 +478,7 @@ class ConditionalPartitionSolver:
         result = dict(global_values=global_values, candidates=[], status='UNKNOWN', search_complete=False,
             termination=[], counters=dict(layouts=0, expansions=0, strictly_dominated=0,
                 memory_rejected=0, relation_rejected=0),
-            missing_cost_requests=[], proofs=proofs, performance_lower_bound_ms=None,
+            missing_cost_requests=[], capacity_rejections=[], proofs=proofs, performance_lower_bound_ms=None,
             lower_bound_ms=None, lower_bound_evidence=None,
             lower_bound_status='NO_PROVEN_BOUND_FOR_COMPLETE_DAG_PREDICTION',
             optimality='not_claimed', fixed_values=fixed, allowed_ranges=allowed_ranges,
@@ -526,8 +539,17 @@ class ConditionalPartitionSolver:
                 scope='enumerated_layout_layer_cost_surrogate',
                 profile_ids=sorted({profile['id'] for profile in layout_profiles.values()}),
                 value_ms=result['layer_load_reference_ms'], admissible_replay_lower_bound=False)
-        layouts = all_layouts[:max_layouts]
-        if len(all_layouts) > len(layouts):
+        from search.policy_frontier import LAYOUT_ID_FIELDS
+        structures = {}
+        for row in all_layouts:
+            identity = fingerprint({name: row.get(name) for name in LAYOUT_ID_FIELDS})
+            structures.setdefault(identity, []).append(row)
+        selected_structures = list(structures)[:max_layouts]
+        layouts = [row for group in zip_longest(*(structures[key] for key in selected_structures))
+            for row in group if row is not None]
+        result['structural_layout_count'] = len(structures)
+        result['selected_structural_layout_count'] = len(selected_structures)
+        if len(structures) > len(selected_structures):
             result['termination'].append('LAYOUT_BUDGET')
         buckets = []
         missing = {}
@@ -646,6 +668,16 @@ class ConditionalPartitionSolver:
                 elif report.get('memory', report).get('admission') == 'REJECT_OOM':
                     row['partition_evidence']['memory_status'] = 'REJECTED_COMPLETE_PLAN'
                     result['counters']['memory_rejected'] += 1
+                    memory = report.get('memory', report)
+                    if len(result['capacity_rejections']) < 4:
+                        result['capacity_rejections'].append(dict(
+                            source='PREDICTED_MEMORY_BOUND', decoder_chunks=row['request']['decoder_chunks'],
+                            execution_backend=row['request']['execution_backend'],
+                            capacity_per_gpu_bytes=int(self.rewriter.topology.memory_per_gpu_gb * 2**30),
+                            peak_bytes=max(memory.get('peak_per_rank_bytes', {}).values(), default=None),
+                            persistent_bytes=max(memory.get('persistent_per_rank_bytes', {}).values(), default=None),
+                            rejection_basis=memory.get('rejection_basis'),
+                            rejected_ranks=memory.get('rejected_ranks', [])[:4]))
                     continue
             if compile_graphs and plan_signature(row['request']) != plan_signature(parent_request):
                 compiled = self.rewriter.complete_and_rewrite(parent_request, row['intent'], limit=1)[0]

@@ -688,6 +688,8 @@ class InvestigationControl(PortfolioControl):
             'tp', 'pp', 'cp', 'dp', 'ep', 'etp', 'expert_dp', 'vpp', 'decoder_chunks', 'micro_batch',
             'sequence', 'global_batch', 'recompute', 'pipeline_schedule', 'overlap_p2p', 'rank_mapping')},
             model_module_types=[kind.value for kind in self.model.layer_types], source_costs=source,
+            execution_analysis=self.execution_decision_report(parent),
+            real_training_feedback=getattr(self, '_planning_last_measured_feedback', None),
             model_structure=dict(partition_units=units,
                 forward_dependencies=self.model_graph['forward_dependencies'],
                 special_modules=self.model_graph['special_modules'],
@@ -762,8 +764,6 @@ class InvestigationControl(PortfolioControl):
             evidence_refs=[prediction['prediction_id']])
 
     def run_investigation_loop(self):
-        if self.config.gpu_execution_enabled:
-            raise ValueError('规划调查入口需要关闭GPU执行，使用已有成本完成搜索')
         parent = self.initialize()
         if parent is None:
             return self.finish()
@@ -811,7 +811,13 @@ class InvestigationControl(PortfolioControl):
             receipts = [self.execute_investigation(action) for action in actions]
             previous_parent = parent
             candidates = self.planning_rankable_trials()
-            if candidates:
+            measured = []
+            if self.config.gpu_execution_enabled:
+                measured = self.execute_planning_measurements(parent,
+                    {identifier for receipt in receipts for identifier in receipt['candidate_ids']},
+                    [receipt['action_id'] for receipt in receipts])
+                parent = self.store.best_measured() or parent
+            elif candidates:
                 parent = min(candidates, key=lambda row: row['prediction']['performance']['step_time_ms'])
             investigated_ids = {identifier for row in receipts for identifier in row['evaluated_candidate_ids']}
             investigated = [row for row in candidates if row['trial_id'] in investigated_ids
@@ -827,6 +833,7 @@ class InvestigationControl(PortfolioControl):
                     selected=parent['trial_id'], execution_comparison=self._planning_last_feedback))
             self.store.save_round(round_index, stage='COMPLETE', parent_trial_id=parent['trial_id'],
                 planning_action_ids=[row['action_id'] for row in receipts],
+                measured_candidate_ids=[row['trial_id'] for row in measured],
                 best_predicted_ms=(parent.get('prediction') or {}).get('performance', {}).get('step_time_ms'))
             self.store.charge(f'round:{round_index}', 'agent_rounds', 1)
         return self.finish()

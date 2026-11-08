@@ -10,6 +10,7 @@ from contracts import fingerprint
 from core_data_models import LayerType, Task, TaskType
 from cost.runtime_calibration import configuration
 from graph.process_groups import process_groups
+from graph.recompute_effect import resolve_recompute_effect
 from predictor.profile_database import normalized_execution, plan_signature, same_training_plan
 from predictor.communication_cost import bind_candidate_execution_conditions
 from predictor.ddp_buckets import compile_bucket_tasks
@@ -24,7 +25,7 @@ from scheduling.task_graph_builder import TaskGraphBuilder
 
 
 DTYPE_BYTES = {'bfloat16': 2, 'float16': 2, 'float32': 4}
-PROJECTION_REVISION = 'native_execution_conditions_v36'
+PROJECTION_REVISION = 'native_execution_conditions_v42_selective_recomputation'
 
 OPTIMIZER_PROFILE_FIELDS = (
     'model', 'checkpoint', 'optimizer', 'optimizer_config', 'optimizer_sharding',
@@ -220,8 +221,11 @@ class DAGProjector:
                 continue
             if 'cost_key' not in row:
                 raise ValueError('执行任务的成本组成缺少稳定身份')
+            evidence_ids = list(row.get('evidence_ids', []))
+            if row.get('evidence_id'):
+                evidence_ids.append(row['evidence_id'])
             components.append(dict(cost_key=row['cost_key'], milliseconds=milliseconds,
-                occurrences=1, evidence_ids=row.get('evidence_ids', [])))
+                occurrences=1, evidence_ids=sorted(set(evidence_ids))))
         return components
 
     @staticmethod
@@ -305,8 +309,8 @@ class DAGProjector:
 
     def _layer(self, layer, phase, rank, config, request, costs):
         if self.reusable_profile is not None and phase in ('forward', 'backward'):
-            field = 'forward_ms' if phase == 'forward' else 'backward_ms'
-            value = self.reusable_profile['layers'][str(layer)][field]
+            effect = resolve_recompute_effect(request, layer, self.reusable_profile)
+            value = effect.forward_ms if phase == 'forward' else effect.backward_ms
             costs.append(dict(status='MEASURED_REUSED', milliseconds=value,
                 cost_key=fingerprint(dict(profile=self.reusable_profile['id'],
                     operation='layer_composite', layer=layer, phase=phase)),
@@ -433,6 +437,45 @@ class DAGProjector:
             values.append(self._communication(output_collective, payload, self._group('tp', rank), costs)[0])
         return self._total(values)
 
+    def _selective_recompute(self, layer, rank, config, request, costs):
+        modules = set(resolve_recompute_effect(request, layer).modules)
+        unsupported = modules - {'core_attn', 'mlp'}
+        if (unsupported or ('mlp' in modules and self.model.layer_types[layer] == LayerType.MOE)
+                or ('core_attn' in modules and config.cp > 1)):
+            identity = dict(layer=layer, modules=sorted(modules), tp=config.tp, cp=config.cp,
+                micro_batch=config.micro_batch_size, sequence=config.sequence_length)
+            costs.append(dict(status='NEEDS_PROFILE', milliseconds=None,
+                reason='选择性重计算的原生复合执行需要相容模块测量',
+                profiling_request=dict(kind='representative_module', identity=identity, cost_key=fingerprint(identity))))
+            return None
+        tokens = config.micro_batch_size * config.sequence_length // config.cp
+        hidden, width = self.model.hidden_size, DTYPE_BYTES[self.dtype]
+        local = tokens // config.tp if config.use_sequence_parallel else tokens
+        values = []
+        if 'core_attn' in modules:
+            dimension = self.model.head_dimension or hidden // self.model.num_attention_heads
+            features = dict(batch=config.micro_batch_size, query_heads=self.model.num_attention_heads // config.tp,
+                kv_heads=max(1, (self.model.num_query_groups or self.model.num_attention_heads) // config.tp),
+                query_length=config.sequence_length, key_length=config.sequence_length,
+                head_dimension=dimension, value_dimension=dimension,
+                causal=self.model_graph['module_structure'].get('is_causal', True),
+                materializes_attention_scores=self.parameters.get('attention', {}).get('materializes_attention_scores', False))
+            values.append(self._compute('attention', features, 'recomputation', rank, config, request, costs, layer_id=layer))
+        if 'mlp' in modules:
+            ffn = self.model.ffn_hidden_size // config.tp
+            if config.use_sequence_parallel and config.tp > 1:
+                values.append(self._communication('all_gather', local * hidden * width, self._group('tp', rank), costs)[0])
+            values.extend((self._gemm('gate_up_recompute', tokens, 2 * ffn, hidden,
+                'recomputation', rank, config, request, costs, layer),
+                self._elementwise('swiglu_recompute', tokens * ffn * 8, tokens * ffn * width * 3,
+                    'recomputation', rank, config, request, costs, layer),
+                self._gemm('down_recompute', tokens, hidden, ffn,
+                    'recomputation', rank, config, request, costs, layer)))
+            operation = 'reduce_scatter' if config.use_sequence_parallel else 'all_reduce'
+            values.append(self._communication(operation, local * hidden * width,
+                self._group('tp', rank), costs)[0])
+        return self._total(values)
+
     def _parameter_counts(self, config, regions):
         model, structure = self.model, self.model_graph['module_structure']
         metadata = self.model_graph.get('parameter_metadata')
@@ -550,11 +593,22 @@ class DAGProjector:
         dimension = self.model.head_dimension or hidden // self.model.num_attention_heads
         heads = self.model.num_attention_heads // config.tp
         kv = max(1, (self.model.num_query_groups or self.model.num_attention_heads) // config.tp)
+        effect = resolve_recompute_effect(request, layers[0] if layers else -1, self.reusable_profile)
+        recomputed = set(effect.modules)
+        if request['recompute'] == 'selective-mlp' and request.get('mlp_recompute_every', 1) != 1:
+            recomputed = set()
+            self.memory_missing.add('partial_mlp_recomputation_activation_lifetimes')
+        if recomputed:
+            self.memory_missing.add('selective_saved_tensor_lifetimes:' + ','.join(sorted(recomputed)))
         for layer in layers:
             total += tokens * ((heads + 2 * kv) * dimension + heads * dimension) * width
             total += local * hidden * width * 2
-            if request['recompute'] == 'none':
-                if self.model.layer_types[layer] == LayerType.MOE:
+            is_moe = self.model.layer_types[layer] == LayerType.MOE
+            retains_ffn = ('moe' not in recomputed if is_moe else 'mlp' not in recomputed)
+            if retains_ffn:
+                if is_moe:
+                    if 'moe_act' in recomputed:
+                        self.memory_missing.add('partially_recomputed_moe_activation_lifetimes')
                     distribution = self._expert_tokens(rank, layer, config)
                     if distribution is None:
                         self.memory_missing.add('expert_activation_token_distribution')
@@ -562,7 +616,8 @@ class DAGProjector:
                         total += sum(distribution['expert_token_counts']) * self.model.ffn_hidden_size // config.etp * width * 3
                 else:
                     total += tokens * self.model.ffn_hidden_size // config.tp * width * 3
-            if self.parameters.get('attention', {}).get('materializes_attention_scores', False):
+            if (self.parameters.get('attention', {}).get('materializes_attention_scores', False)
+                    and 'core_attn' not in recomputed):
                 total += config.micro_batch_size * heads * config.sequence_length // config.cp * config.sequence_length * width
         return total
 
@@ -1036,8 +1091,10 @@ class DAGProjector:
         for rank, row in phases.items():
             physical = self.groups['rank_mapping'][rank]
             host_by_node[physical // self.topology.gpus_per_node] += row['host_cpu_memory_peak_bytes']
-        rejected = any(states[rank]['persistent_bytes'] + reserve > capacity
-            for rank in range(config.world_size))
+        persistent = {self.groups['rank_mapping'][rank]: states[rank]['persistent_bytes']
+            for rank in range(config.world_size)}
+        rejected_ranks = sorted(rank for rank, value in persistent.items() if value + reserve > capacity)
+        rejected = bool(rejected_ranks)
         predicted_over = any(value < 0 for value in headroom.values())
         near_capacity = min(headroom.values()) < max(reserve, capacity // 10)
         host_over = host_capacity is not None and any(value > host_capacity for value in host_by_node.values())
@@ -1047,6 +1104,8 @@ class DAGProjector:
         status = ('REJECTED_MEMORY_LOWER_BOUND' if rejected else
             'NEEDS_MEMORY_VALIDATION' if needs_validation else 'PREDICTED_SAFE')
         return dict(peak_per_rank_bytes=peaks, breakdown_per_rank=breakdown,
+            persistent_per_rank_bytes=persistent, rejected_ranks=rejected_ranks,
+            rejection_basis='persistent_state_plus_configured_reserve' if rejected else None,
             memory_headroom_per_rank_bytes=headroom, admission=admission,
             status=status,
             physical_memory_status='MEMORY_UNCERTAIN' if missing else 'ANALYTICAL_UPPER_BOUND',
@@ -1074,11 +1133,14 @@ class DAGProjector:
         self.mode, self.cost_cache, self.memory_missing, self.blind = cost_mode, {}, set(), blind
         self.current_plan_signature = plan_signature(request)
         network = self.parameters.get('network', {})
+        default_topology = dict(devices=self.topology.devices,
+            software=self.topology.software, environment=network.get('environment', {}),
+            environment_per_node=network.get('environment_per_node', self.topology.environment_per_node),
+            paths=self.topology.network_paths)
+        if self.topology.environment_per_rank:
+            default_topology['environment_per_rank'] = self.topology.environment_per_rank
         self.active_communication_topology = bind_candidate_execution_conditions(
-            network.get('topology_identity', dict(devices=self.topology.devices,
-                software=self.topology.software, environment=network.get('environment', {}),
-                environment_per_node=network.get('environment_per_node', self.topology.environment_per_node),
-                paths=self.topology.network_paths)), request)
+            network.get('topology_identity', default_topology), request)
         self.calibration_run_ids = None
         if blind:
             registered = [json.loads(row[0])['request'] for row in
@@ -1155,16 +1217,22 @@ class DAGProjector:
                         else:
                             reused_components.extend(layer_cache[recompute_key][1])
                         durations.append(layer_cache[recompute_key][0])
-                    elif phase == 'backward' and request['recompute'] == 'selective-mlp' and self.reusable_profile is None:
-                        hidden, ffn = self.model.hidden_size, self.model.ffn_hidden_size // config.tp
-                        tokens = config.micro_batch_size * config.sequence_length // config.cp
-                        durations.extend((self._gemm('gate_up_recompute', tokens, 2 * ffn, hidden,
-                            'recomputation', task.rank, config, request, costs, layer),
-                            self._gemm('down_recompute', tokens, hidden, ffn,
-                            'recomputation', task.rank, config, request, costs, layer)))
+                    elif (phase == 'backward' and request['recompute'] in ('selective', 'selective-mlp')
+                            and self.reusable_profile is None):
+                        recompute_key = (layer, 'selective_recomputation', task.rank)
+                        if recompute_key not in layer_cache:
+                            layer_cost_start = len(costs)
+                            value = self._selective_recompute(layer, task.rank, config, request, costs)
+                            layer_cache[recompute_key] = (value, self._cost_components(costs[layer_cost_start:]))
+                        else:
+                            reused_components.extend(layer_cache[recompute_key][1])
+                        durations.append(layer_cache[recompute_key][0])
                 task.duration = self._total(durations)
                 task.metadata.update(layer_ids=layers, projection_only_cost_composition=True,
                     internal_collective_scope='region_composite_internal_communication_estimate',
+                    recompute_policy=request['recompute'],
+                    recompute_modules=list(resolve_recompute_effect(request, layers[0] if layers else -1).modules),
+                    measured_composite_includes_recomputation=self.reusable_profile is not None,
                     activation_bytes=self._activation_bytes(layers, task.rank, config, request))
                 overhead = self._region_overhead(task.region_id, phase, config, costs)
                 if overhead is not None:
@@ -1316,7 +1384,15 @@ class DAGProjector:
         self._gradient_tasks(tasks, counts, config, request, costs)
         self._parameter_gather_tasks(tasks, counts, config, request, costs)
         if any(task.duration is None for task in tasks.values()):
-            return self._report(request, source, costs, started, 'NEEDS_PROFILE', '候选部分任务缺少可靠成本')
+            report = self._report(request, source, costs, started, 'NEEDS_PROFILE', '候选部分任务缺少可靠成本')
+            report['partial_execution_graph'] = dict(task_count=len(tasks),
+                source_graph_sha256=fingerprint(source), representation='partially_costed_native_execution_graph',
+                tasks={key: dict(rank=self.groups['rank_mapping'][task.rank], logical_rank=task.rank,
+                    kind=task.task_type.value, region=task.region_id, microbatch=task.microbatch_id,
+                    dependencies=task.dependencies, duration_ms=task.duration,
+                    resources=list(task.resource_requirements), metadata=task.metadata)
+                    for key, task in tasks.items()})
+            return report
         _, predecessors, _ = topological_order(tasks)
         durations = {key: task.duration for key, task in tasks.items()}
         evaluator = ScheduleCostEvaluator(None)

@@ -9,8 +9,10 @@ from region_partition.region_partitioner import RegionPartitioner
 from validation.parallel_validator import validate_candidate
 from agents.program_agent import ProgramAgent
 from agents.strategy_transformations import StrategyTransformationCompiler
+from graph.capability_registry import tensor_parallel_limit, validate_attention_capability
 from graph.process_groups import process_groups
 from predictor.physical_paths import communication_resources
+from predictor.profile_database import plan_signature
 
 
 class CompleteAndRewrite:
@@ -21,11 +23,24 @@ class CompleteAndRewrite:
         if not self.domains['tp']:
             raise ValueError('当前搜索域没有可执行的Tensor并行候选')
         self.compiler = StrategyTransformationCompiler(model, topology, self.domains)
+        self.execution_references = {}
+
+    def register_execution_reference(self, request, graph, evidence_id):
+        if not evidence_id or not graph.get('tasks'):
+            raise ValueError('执行目标引用需要完整任务记录与证据编号')
+        self.execution_references[plan_signature(request)] = dict(
+            evidence_id=evidence_id, tasks=graph['tasks'])
 
     def candidate(self, request, parent_id=None):
-        maximum_tp = self.topology.num_gpus
+        attention = request.get('attention_backend_capabilities', self.registry.attention_capabilities)
+        validate_attention_capability(dict(request, attention_backend_capabilities=attention),
+            self.registry.model_config, self.topology)
+        maximum_tp = min(self.topology.num_gpus, tensor_parallel_limit(request))
         if type(request['tp']) is not int or not 1 <= request['tp'] <= maximum_tp:
             raise ValueError(f'Tensor并行候选必须满足1≤TP≤{maximum_tp}')
+        mamba_groups = self.registry.model_config.get('mamba_n_groups')
+        if mamba_groups is not None and mamba_groups % request['tp']:
+            raise ValueError('模型的Mamba分组数必须能被TP整除')
         config = configuration(request)
         regions = RegionPartitioner(self.model, config).from_counts(request['decoder_chunks'])
         valid, errors = validate_candidate(config, self.model, self.topology, regions)
@@ -102,10 +117,22 @@ class CompleteAndRewrite:
             changed_flows = {flow_id for flow_id, task_ids in flow_tasks.items() if task_ids & changed}
             changed_targets = set(intent.target_task_ids) & changed
             changed_targets.update(set(intent.target_flow_ids) & changed_flows)
+            reference = self.execution_references.get(plan_signature(request), {})
+            structural_ids = self.compiler.graph(self.candidate(request)).tasks
+            replay_targets = []
+            for target in set(intent.target_task_ids) - structural_ids.keys():
+                origin = reference.get('tasks', {}).get(target, {}).get('metadata', {}).get('origin_task')
+                if origin in changed:
+                    changed_targets.add(target)
+                elif origin not in structural_ids:
+                    replay_targets.append(target)
             targets = set(intent.target_task_ids) | set(intent.target_flow_ids)
             row['graph_delta']['target_impact'] = dict(target_ids=sorted(targets),
                 changed_target_ids=sorted(changed_targets),
-                status='AFFECTED' if changed_targets else 'UNCHANGED' if targets else 'UNSPECIFIED')
+                execution_reference_id=reference.get('evidence_id'),
+                requires_execution_replay=sorted(replay_targets),
+                status='REQUIRES_EXECUTION_REPLAY' if replay_targets else
+                    'AFFECTED' if changed_targets else 'UNCHANGED' if targets else 'UNSPECIFIED')
             row['constraint_result'] = dict(status='PASS', scope='native_backend_structural_legality',
                 numerical_validation='requires_actual_training')
             row['layout_conversions'] = dict(communication_task_ids=row['graph_delta']['impact']['communication_task_ids'],
@@ -130,7 +157,7 @@ class CompleteAndRewrite:
         dimensions = ('tp', 'pp', 'cp', 'ep', 'etp', 'expert_dp', 'dp', 'vpp', 'micro_batch', 'group')
         allowed_fields = set(dimensions) | {'decoder_chunks', 'recompute', 'bucket_elements', 'overlap_p2p',
             'rank_mapping', 'pipeline_schedule', 'optimizer_sharding', 'precision_aware_optimizer',
-            'offload', 'optimizer_offload_fraction', 'optimizer_transfer_overlap', 'memory_policy',
+            'offload', 'optimizer_offload_fraction', 'optimizer_transfer_overlap', 'optimizer_pin_cpu_params', 'memory_policy',
             'execution_backend', 'megatron_fsdp_version', 'fsdp_sharding_strategy', 'dense_sharding_strategy',
             'expert_sharding_strategy', 'dp_inner_size', 'dp_outer_size', 'outer_sharding_strategy',
             'expert_dp_inner_size', 'expert_dp_outer_size', 'expert_outer_sharding_strategy',
@@ -154,7 +181,8 @@ class CompleteAndRewrite:
         adjustable = set(intent.adjustable) - set(intent.preserve)
         parent = self.candidate(parent_request)
         graph = self.compiler.graph(parent)
-        if not set(intent.target_task_ids) <= set(graph.tasks):
+        reference = self.execution_references.get(plan_signature(parent_request), {})
+        if not set(intent.target_task_ids) <= set(graph.tasks) | set(reference.get('tasks', {})):
             raise ValueError(dict(status='CONSTRAINT_CONFLICT', conflicts=['优化意图引用了不存在的目标Task ID']))
 
         if not set(intent.target_flow_ids) <= set(self.flow_tasks(graph)):
@@ -185,7 +213,7 @@ class CompleteAndRewrite:
             else:
                 values = [initial]
             if name == 'tp':
-                maximum_tp = max(self.domains['tp'])
+                maximum_tp = min(max(self.domains['tp']), tensor_parallel_limit(parent_request))
                 values = [value for value in values if value <= maximum_tp]
                 if not values:
                     raise ValueError(dict(status='CONSTRAINT_CONFLICT',
@@ -204,8 +232,19 @@ class CompleteAndRewrite:
                 completion_changes.append(changed)
         world = self.topology.num_gpus
         if self.model.num_experts is None:
-            solver_model.add(variables['etp'] == variables['tp'])
             solver_model.add(variables['ep'] == 1)
+            backend = intent.values.get('execution_backend')
+            choices = intent.allowed_ranges.get('execution_backend', ()) if 'execution_backend' in adjustable else ()
+            if backend is None and not choices:
+                backend = parent_request.get('execution_backend', 'megatron_ddp')
+            if backend == 'megatron_fsdp' or (backend is None and tuple(choices) == ('megatron_fsdp',)):
+                solver_model.add(variables['etp'] == 1)
+            elif backend == 'megatron_ddp' or (backend is None and tuple(choices) == ('megatron_ddp',)):
+                solver_model.add(variables['etp'] == variables['tp'])
+            else:
+                use_fsdp = solver_model.new_bool_var('dense_fsdp_expert_axis')
+                solver_model.add(variables['etp'] == 1).only_enforce_if(use_fsdp)
+                solver_model.add(variables['etp'] == variables['tp']).only_enforce_if(use_fsdp.Not())
         solver_model.add_multiplication_equality(world, [variables[name] for name in ('tp', 'pp', 'cp', 'dp')])
         solver_model.add_multiplication_equality(world,
             [variables[name] for name in ('etp', 'ep', 'expert_dp', 'pp')])
@@ -270,7 +309,7 @@ class CompleteAndRewrite:
                 request['megatron_fsdp_version'] = 1
                 request['fsdp_sharding_strategy'] = request['dense_sharding_strategy']
                 if request.get('megatron_fsdp_main_params_dtype') is None:
-                    request['megatron_fsdp_main_params_dtype'] = 'float32'
+                    request['megatron_fsdp_main_params_dtype'] = request.get('main_params_dtype', 'float32')
                 if request.get('megatron_fsdp_main_grads_dtype') is None:
                     request['megatron_fsdp_main_grads_dtype'] = request.get('main_grads_dtype',
                         'bfloat16' if request.get('precision_aware_optimizer', False) else 'float32')
@@ -278,6 +317,7 @@ class CompleteAndRewrite:
             request['offload'] = offload_fraction > 0
             if offload_fraction == 0:
                 request['optimizer_transfer_overlap'] = False
+                request.pop('optimizer_pin_cpu_params', None)
             if 'dp_inner_size' not in intent.values and 'dp_inner_size' not in intent.preserve:
                 request['dp_inner_size'] = request['dp'] * request['cp']
                 request['dp_outer_size'] = 1

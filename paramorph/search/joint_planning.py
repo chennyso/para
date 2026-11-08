@@ -11,9 +11,64 @@ from predictor.profile_database import normalized_execution, plan_signature, sig
 from search.conditional_partition import ConditionalPartitionSolver, REWRITE_FIELDS
 from search.family_state import FamilyLedger, GLOBAL_FIELDS, global_identity, global_values
 from search.seed_planner import SeedPlanner
+from search.joint_scope import JointScopeCompiler
+from search.policy_frontier import PolicyFrontier
 
 
 class JointPlanning:
+    def solve_joint_scope(self, parent_request, family, intent, limit):
+        self.synchronize_cost_revision()
+        intent = RewriteIntent.model_validate(intent)
+        scope = JointScopeCompiler().compile(parent_request, family, intent)
+        measured_signatures = sorted({plan_signature(row['plan']['backend_config']) for row in self.store.trials()
+            if (row.get('measurement') or {}).get('status') == 'PASS'
+            and row['measurement'].get('performance_eligible') is True
+            and all(row['plan']['backend_config'].get(name) == parent_request.get(name)
+                for name in ('warmup', 'measured'))})
+        key = fingerprint(dict(parent=plan_signature(parent_request), family=family,
+            intent=intent.model_dump(mode='json'), limit=limit, cost_revision=self.cost_revision,
+            measured_signatures=measured_signatures))
+        if not hasattr(self, '_joint_scope_completions'):
+            self._joint_scope_completions = {}
+        if key in self._joint_scope_completions:
+            return deepcopy(self._joint_scope_completions[key])
+        closed = intent.model_copy(update=dict(values=dict(scope.global_values, **scope.fixed_values),
+            adjustable=list(scope.adjustable), allowed_ranges=scope.allowed_ranges, preserve=[]))
+        completion = self.solve_conditional_family(parent_request, family, closed, limit=max(2, limit))
+        frontier = PolicyFrontier(self.rewriter).expand(parent_request, completion['candidates'], scope, limit,
+            measured_signatures=measured_signatures)
+        evaluated = []
+        for row in frontier['candidates']:
+            prediction = self.evaluate_planning_request(row['request'], parent_request)
+            evaluated.append(dict(layout_id=row['policy_layout_id'], plan_signature=plan_signature(row['request']),
+                policy=dict(recompute=row['request']['recompute'],
+                    modules=(row['request'].get('memory_policy') or {}).get('recompute_modules', []),
+                    backend=row['request']['execution_backend'],
+                    optimizer_offload=row['request'].get('optimizer_offload_fraction', 0)),
+                prediction_id=None if prediction is None else prediction['prediction_id'],
+                step_time_ms=None if prediction is None else prediction['performance']['step_time_ms'],
+                memory=None if prediction is None else prediction['memory'],
+                missing_profiles=[] if prediction is None else prediction['evidence'].get('missing_profiles', []),
+                comparison_conditions=None if prediction is None else dict(
+                    revision=prediction.get('cost_database_revision'),
+                    predictor=prediction.get('evidence', {}).get('predictor_revision'),
+                    anchor=prediction.get('evidence', {}).get('compatible_anchor_id')),
+                status='PREDICTION_BUDGET' if prediction is None else prediction['prediction_status']))
+        retention = PolicyFrontier.retain(evaluated)
+        report = dict(kind='policy_frontier', scope=scope.__dict__,
+            cost_database_revision=self.cost_revision, layouts=frontier['comparisons'], evaluations=evaluated,
+            retention=retention,
+            policy_generation_complete=completion['search_complete']
+                and all(row['status'] == 'COMPLETE' for row in frontier['comparisons']),
+            evaluation_status='PARTIAL' if retention['unresolved'] else 'COMPLETE')
+        identifier = fingerprint(report)
+        self.store.add_evidence(identifier, 'PREDICTED', report)
+        result = dict(completion, candidates=[row for row in frontier['candidates']
+            if plan_signature(row['request']) in retention['retained']], policy_frontier_evidence_id=identifier,
+            policy_frontier=report)
+        self._joint_scope_completions[key] = deepcopy(result)
+        return result
+
     def evaluate_planning_request(self, request, parent_request):
         self.synchronize_cost_revision()
         self.rewriter.candidate(request)
@@ -200,11 +255,10 @@ class JointPlanning:
                 parent=plan_signature(parent_request)))
         else:
             intent = RewriteIntent.model_validate(intent)
-            if all(key in intent.values for key in GLOBAL_FIELDS):
-                values = {key: intent.values[key] for key in GLOBAL_FIELDS}
-            else:
-                closed = self.rewriter.complete(parent_request, intent, limit=1)[0]['request']
-                values = global_values(closed)
+            values = {key: family['values'][key] for key in GLOBAL_FIELDS}
+            conflicts = [key for key in GLOBAL_FIELDS if key in intent.values and intent.values[key] != values[key]]
+            if conflicts:
+                raise ValueError(dict(status='CONSTRAINT_CONFLICT', conflicts=conflicts))
             evidence_id = fingerprint(intent.model_dump(mode='json'))
             normalized = normalized_execution(parent_request)
             for key in REWRITE_FIELDS:
@@ -314,6 +368,18 @@ class JointPlanning:
                 potential, len(record['pending_cost_keys']) if record else 0,
                 -row['parent_distance'], row['family_id'])
         families.sort(key=priority)
+        covered = set()
+        coverage_first = []
+        deferred = []
+        for family in families:
+            values = family['values']
+            mechanism = (values['pp'], values['ep'], values['tp'], values['cp'])
+            if mechanism in covered:
+                deferred.append(family)
+            else:
+                covered.add(mechanism)
+                coverage_first.append(family)
+        families = [*coverage_first, *deferred]
         candidates = []
         per_family = min(3, limit)
         family_attempt_limit = max(8, limit * 4)
@@ -337,7 +403,7 @@ class JointPlanning:
         catalog = self.family_catalog(parent, candidates)
         catalog['initial_family_attempt_limit'] = family_attempt_limit
         catalog['initial_family_attempted'] = attempted_families
-        catalog['initial_family_selection'] = 'best_first_bounded_conditional_completion'
+        catalog['initial_family_selection'] = 'unseen_cost_priority_with_parallel_mechanism_coverage'
         evidence_id = fingerprint(dict(kind='conditional_global_family_catalog', catalog=catalog))
         self.store.add_evidence(evidence_id, 'PREDICTED', dict(kind='conditional_global_family_catalog', **catalog))
         return candidates, catalog | dict(evidence_id=evidence_id)
@@ -378,19 +444,29 @@ class JointPlanning:
         return keys
 
     def bottleneck_impact(self, trial, task_ids, epsilon=0.1):
-        prediction = self.full_prediction(trial)
-        graph = BottleneckGraph(prediction['execution_graph'], evidence_refs=[prediction['prediction_id']])
-        closure = graph.closure(task_ids, dependency_depth=1, include_resources=True)
-        impact = graph.epsilon_impact(closure['task_ids'], epsilon,
-            resource_model=self.predictor.projector.parameters.get('resource_replay', {}))
-        self.store.charge('impact:' + fingerprint(dict(prediction=prediction['prediction_id'],
+        graph, scope = self.bottleneck_graph(trial)
+        targets = graph.closure(task_ids, dependency_depth=0, include_resources=False)
+        closure = graph.closure(task_ids, dependency_depth=1, include_resources=False)
+        if scope != 'PREDICTED_COSTED_DAG':
+            return dict(status='NEEDS_PROFILE', target_task_ids=targets['task_ids'],
+                closure=graph.page(closure, limit=16, max_chars=6000), impact=None)
+        resource_model = self.predictor.projector.parameters.get('resource_replay', {})
+        baseline = graph.replay(resource_model=resource_model)
+        closure = graph.causal_closure(targets['task_ids'], baseline, dependency_depth=1)
+        impact = graph.epsilon_impact(targets['task_ids'], epsilon,
+            resource_model=resource_model, baseline_replay=baseline)
+        self.store.charge('impact:' + fingerprint(dict(graph=graph.graph_id,
             task_ids=task_ids, epsilon=epsilon)), 'counterfactual_replays', 2)
-        return dict(closure=graph.page(closure, limit=16, max_chars=6000), impact=impact)
+        return dict(status='AVAILABLE', target_task_ids=targets['task_ids'],
+            closure=graph.page(closure, limit=16, max_chars=6000), impact=impact)
 
     def bottleneck_graph(self, trial):
         if trial.get('prediction') is not None:
-            prediction = self.full_prediction(trial)
-            return (BottleneckGraph(prediction['execution_graph'],
+            prediction = trial['prediction']
+            projected = self.load_prediction_graph(prediction)
+            if projected is not None and all(row.get('duration_ms') is not None
+                    for row in projected['tasks'].values()):
+                return (BottleneckGraph(projected,
                 evidence_refs=[prediction['prediction_id']]), 'PREDICTED_COSTED_DAG')
         graph = self.backend_dag(trial)
         tasks = {}

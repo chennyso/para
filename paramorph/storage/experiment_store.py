@@ -8,6 +8,14 @@ import time
 from contracts import fingerprint
 
 
+def prediction_evidence(document):
+    document = dict(document)
+    document.pop('evaluation_seconds', None)
+    document['diagnosis'] = {key: value for key, value in document.get('diagnosis', {}).items()
+        if key not in ('full_replays', 'prediction_cache_hit', 'reused_region_costs', 'new_region_costs')}
+    return document
+
+
 class ExperimentStore:
     def __init__(self, path):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -46,9 +54,12 @@ class ExperimentStore:
     def add_search_state(self, kind, document):
         if kind not in ('INITIAL_CONFIGURATION', 'INITIAL_CONFIGURATION_RESULT',
                         'BASELINE_REUSE_DECISION', 'BASELINE_RUNTIME_BINDING', 'CHECKPOINT_VALIDATION_IN_TRAINING',
-                        'AGENT_RESPONSE', 'PLANNING_INVESTIGATION', 'PLANNING_FEEDBACK',
+                        'AGENT_RESPONSE', 'AGENT_RUNTIME_REPLAY', 'PLANNING_INVESTIGATION', 'PLANNING_FEEDBACK',
                         'PLANNING_PORTFOLIO_QUEUE', 'PLANNING_PORTFOLIO_DISPATCH', 'PLANNING_EVALUATION',
                         'PLANNING_EXECUTION_CONTEXT', 'COST_MEASUREMENT_AVAILABLE_TO_AGENT',
+                        'PLANNING_GPU_SELECTION', 'PLANNING_TRAINING_FEEDBACK',
+                        'MEASURED_PARENT_COST_CALIBRATION', 'TRAINING_MEMORY_REJECTED',
+                        'CAPACITY_VALIDATION_BEFORE_BENCHMARK',
                         'COST_REQUEST_DEFERRED_BEFORE_GPU_START'):
             raise ValueError('Search State Repository记录类型未注册')
         encoded = json.dumps(document, sort_keys=True, allow_nan=False)
@@ -107,7 +118,8 @@ class ExperimentStore:
         if row is None:
             raise ValueError('实验记录不存在')
         document = json.loads(row[0])
-        if set(fields) - {'validation', 'prediction', 'measurement', 'state', 'failure', 'trace', 'completed_at'}:
+        if set(fields) - {'validation', 'prediction', 'measurement', 'measurement_reuse',
+                'state', 'failure', 'trace', 'completed_at'}:
             raise ValueError('实验更新包含未知字段')
         document.update(fields)
         self.connection.execute('UPDATE trials SET document=? WHERE id=?',
@@ -121,10 +133,7 @@ class ExperimentStore:
         if kind not in ('MEASURED', 'PREDICTED', 'PROJECTED', 'HYPOTHESIS', 'FAILURE'):
             raise ValueError('证据类型未注册')
         if kind in ('PREDICTED', 'PROJECTED') and 'prediction_id' in document:
-            document = dict(document)
-            document.pop('evaluation_seconds', None)
-            document['diagnosis'] = {key: value for key, value in document.get('diagnosis', {}).items()
-                if key not in ('full_replays', 'prediction_cache_hit', 'reused_region_costs', 'new_region_costs')}
+            document = prediction_evidence(document)
         encoded = json.dumps(document, sort_keys=True, allow_nan=False)
         previous = self.connection.execute('SELECT kind, document FROM evidence WHERE id=?', (identifier,)).fetchone()
         if previous and previous != (kind, encoded):
@@ -254,6 +263,7 @@ class ExperimentStore:
 
     def put_profile_request(self, request):
         from contracts import ProfilingRequest
+        from predictor.profile_database import normalized_execution
         request = ProfilingRequest.model_validate(request)
         existing = self.connection.execute('SELECT document FROM profiling_requests WHERE id=?',
             (request.request_id,)).fetchone()
@@ -261,8 +271,18 @@ class ExperimentStore:
         if existing:
             previous = json.loads(existing[0])
             for key in ('measurement_type', 'execution_request'):
-                if previous[key] != document[key]:
-                    raise ValueError('同一Profiling请求身份对应不同测量条件')
+                before, after = previous[key], document[key]
+                required = {'node_count', 'gpus_per_node', 'tp', 'pp', 'cp', 'dp', 'ep', 'vpp'}
+                if (key == 'execution_request' and required <= before.keys() and required <= after.keys()):
+                    before = before | normalized_execution(before)
+                    after = after | normalized_execution(after)
+                if before != after:
+                    differences = ({name: dict(previous=before.get(name), requested=after.get(name))
+                        for name in set(before) | set(after) if before.get(name) != after.get(name)}
+                        if isinstance(before, dict) and isinstance(after, dict)
+                        else dict(previous=before, requested=after))
+                    raise ValueError(dict(status='PROFILE_CONDITION_CONFLICT',
+                        request_id=request.request_id, field=key, differences=differences))
             previous['trial_ids'] = sorted(set(previous['trial_ids'] + document['trial_ids']))
             previous['cost_keys'] = sorted(set(previous['cost_keys'] + document['cost_keys']))
             document = previous

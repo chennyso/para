@@ -225,6 +225,7 @@ class SystemConfig(Contract):
     profile_id: str | None = None
     baseline_directory: str
     output_directory: str
+    continuation_history_path: str | None = None
     pods: list[str]
     cluster_context: str = 'prd'
     namespace: str = 'default'
@@ -234,7 +235,22 @@ class SystemConfig(Contract):
     external_agent_authorization_path: str | None = None
     max_llm_calls_per_round: int = Field(default=4, ge=0, le=4,
         description='每轮允许启动的不同Agent角色数量；工具追问的实际Provider请求受max_agent_calls控制')
+    fast_agent_rounds: bool = False
+    initial_cost_calibration_enabled: bool = True
+    boundary_cost_calibration_enabled: bool = False
     llm_provider: Literal['codex', 'direct_api'] = 'direct_api'
+    agent_cli_context_profile: Literal['default', 'structured'] = 'structured'
+    agent_cli_model_instructions_file: str | None = None
+    agent_request_profile: Literal['full', 'decision', 'compact'] = 'full'
+    agent_recent_runtime_failure_evidence: bool = False
+    fsdp_load_validation_seconds: int = Field(default=120, ge=60, le=900)
+    constraint_review_policy: Literal['always', 'native_complete'] = 'always'
+    single_decision_round: bool = False
+    budgeted_investigation_enabled: bool = False
+    compact_results: bool = False
+    agent_token_budget_enabled: bool = True
+    round_input_token_limit: int = Field(default=10000, gt=0)
+    round_total_token_limit: int = Field(default=10000, gt=0)
     llm_base_url: str | None = None
     tokenizer_cache_directory: str | None = None
     budget: SearchBudget
@@ -288,8 +304,13 @@ class SystemConfig(Contract):
 
     @model_validator(mode='after')
     def validate_allocation(self):
-        if len(self.pods) != self.request['node_count']:
-            raise ValueError('Pod数量与实际训练节点数量不一致')
+        per_node = self.request.get('gpus_per_node', 8)
+        per_worker = self.request.get('gpus_per_worker', per_node)
+        if type(per_worker) is not int or per_worker < 1 or per_node % per_worker:
+            raise ValueError('每个Worker的GPU数必须整除单台物理节点的GPU数')
+        expected = self.request['node_count'] * per_node // per_worker
+        if len(self.pods) != expected or len(set(self.pods)) != expected:
+            raise ValueError('Pod数量必须覆盖实际训练Worker且身份唯一')
         if not self.agent_model:
             raise ValueError('真实Agent调用需要明确模型名称')
         return self

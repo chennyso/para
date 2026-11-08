@@ -1,7 +1,10 @@
 from collections import Counter
 from copy import deepcopy
+from dataclasses import asdict
 
+from core_data_models import MemoryPolicy
 from graph.process_groups import process_groups
+from predictor.profile_database import normalized_execution
 
 
 STRATEGY_FIELDS = ('tp', 'pp', 'cp', 'dp', 'ep', 'etp', 'vpp', 'micro_batch',
@@ -11,6 +14,84 @@ STRATEGY_FIELDS = ('tp', 'pp', 'cp', 'dp', 'ep', 'etp', 'vpp', 'micro_batch',
 WORKLOAD_FIELDS = ('name', 'model', 'data', 'sequence', 'global_batch', 'precision',
     'optimizer', 'optimizer_hyperparameters', 'main_grads_dtype', 'main_params_dtype',
     'exp_avg_dtype', 'exp_avg_sq_dtype', 'node_count', 'gpus_per_node')
+
+
+def strategy_decision_values(request):
+    effective = normalized_execution(request)
+    policy = asdict(MemoryPolicy(**(request.get('memory_policy') or {})))
+    return dict(
+        parallelism={key: effective[key] for key in ('tp', 'pp', 'cp', 'dp', 'ep', 'etp',
+            'expert_dp', 'sequence_parallel')},
+        micro_batch=request['micro_batch'],
+        recomputation=dict(mode=request['recompute'],
+            granularity=policy['recompute_granularity'], modules=sorted(policy['recompute_modules'])),
+        module_partition=request['decoder_chunks'],
+        schedule={key: effective[key] for key in ('vpp', 'group', 'pipeline_schedule', 'overlap_p2p')},
+        communication=dict(bucket_elements=effective['bucket_elements'], rank_mapping=effective['rank_mapping']),
+        state_sharding={key: effective[key] for key in ('execution_backend', 'optimizer_sharding',
+            'dense_sharding_strategy', 'expert_sharding_strategy', 'dp_inner_size', 'dp_outer_size',
+            'expert_dp_inner_size', 'expert_dp_outer_size', 'fsdp_prefetch', 'fsdp_bucket_elements')},
+        storage_policy={key: value for key, value in policy.items()
+            if key not in ('recompute_granularity', 'recompute_modules')}
+            | {key: effective[key] for key in ('optimizer_offload_fraction', 'optimizer_transfer_overlap')})
+
+
+def strategy_decision_evidence(parent, trials, domains, *, limit=8):
+    request = parent['plan']['backend_config']
+    current = strategy_decision_values(request)
+    identity = normalized_execution(request)
+    variable_fields = {'micro_batch', 'recompute', 'memory_policy'}
+    for group in ('parallelism', 'schedule', 'communication', 'state_sharding', 'storage_policy'):
+        variable_fields.update(current[group])
+    records = []
+    for trial in trials:
+        measured = trial.get('measurement') or {}
+        other = trial['plan']['backend_config']
+        if measured.get('status') != 'PASS' or measured.get('performance_eligible') is not True:
+            continue
+        if trial.get('measurement_reuse'):
+            continue
+        if any(other.get(key) != request.get(key) for key in WORKLOAD_FIELDS):
+            continue
+        effective = normalized_execution(other)
+        if any(effective.get(key) != value for key, value in identity.items() if key not in variable_fields):
+            continue
+        records.append(dict(trial_id=trial['trial_id'], run_id=measured['run_id'],
+            decisions=strategy_decision_values(other),
+            tokens_per_second=measured['tokens_per_second'], step_seconds=measured['step_seconds'],
+            peak_allocated_gib=measured.get('peak_allocated_gib')))
+    coverage = []
+    for name, value in current.items():
+        matched = [row for row in records if all(row['decisions'][other] == current[other]
+            for other in current if other != name)]
+        observations = [dict(trial_id=row['trial_id'], run_id=row['run_id'], value=row['decisions'][name],
+            tokens_per_second=row['tokens_per_second'], peak_allocated_gib=row['peak_allocated_gib'])
+            for row in matched]
+        coverage.append(dict(decision=name, incumbent_value=value,
+            measured_at_other_incumbent_settings=observations[-limit:],
+            distinct_measured_values=len({str(row['value']) for row in observations}),
+            status='ALTERNATIVES_MEASURED' if any(row['value'] != value for row in observations)
+                else 'INCUMBENT_ONLY' if observations else 'NO_MATCHED_MEASUREMENT'))
+    contrasts = []
+    for left, right in zip(records, records[1:]):
+        changed = [name for name in current if left['decisions'][name] != right['decisions'][name]]
+        contrasts.append(dict(before_trial_id=left['trial_id'], after_trial_id=right['trial_id'],
+            before_run_id=left['run_id'], after_run_id=right['run_id'], changed_decisions=changed,
+            changes={name: dict(before=left['decisions'][name], after=right['decisions'][name]) for name in changed},
+            observed_throughput_change=right['tokens_per_second'] / left['tokens_per_second'] - 1,
+            attribution='single_decision_observation' if len(changed) == 1 else 'joint_configuration_observation',
+            replication='single_record_pair_without_statistical_significance_test'))
+    batches = [value for value in domains['micro_batch']
+        if request['global_batch'] % (request['dp'] * value) == 0]
+    return dict(source='current_search_successful_training_records_only',
+        incumbent_trial_id=parent['trial_id'], effective_decisions=current,
+        coverage=coverage, recent_measured_contrasts=contrasts[-limit:],
+        micro_batch_schedule=[dict(micro_batch=value,
+            num_microbatches=request['global_batch'] // (request['dp'] * value)) for value in batches],
+        legal_scope='joint_candidates_require_native_validation_of_all_changed_settings',
+        evidence_scope='successful_configuration_does_not_establish_optimality_of_inherited_settings',
+        selection_owner='Agent_selects_joint_changes_using_measured_tradeoffs_and_unresolved_alternatives',
+        prediction_scope='parent_task_sensitivity_does_not_rank_unmeasured_joint_strategies')
 
 
 def execution_structure(request, devices, model=None):
@@ -60,6 +141,22 @@ def execution_structure(request, devices, model=None):
             expert_modules_per_stage_rank=[row['moe'] * (model.num_experts or 0) // request['ep']
                 for row in kinds],
             scope='module_ownership_before_state_sharding_excluding_embedding_and_output')
+        vocabulary = model.finalize_grad_semantics.get('vocab_size')
+        structure['boundary_modules'] = dict(
+            embedding=dict(pp_rank=0, vocabulary_rows=vocabulary, hidden_size=model.hidden_size,
+                tensor_partition_axis='vocabulary', tensor_shards=request['tp']),
+            output=dict(pp_rank=request['pp'] - 1, vocabulary_rows=vocabulary,
+                hidden_size=model.hidden_size, tensor_partition_axis='vocabulary',
+                tensor_shards=request['tp']),
+            loss=dict(pp_rank=request['pp'] - 1),
+            tied_weights=model.finalize_grad_semantics.get('share_embeddings_and_output_weights', False),
+            counted_in_decoder_chunks=False,
+            decision_dependencies=dict(
+                tp='改变词汇矩阵的张量分片及对应计算通信',
+                pp='改变首末物理阶段及其共驻Transformer模块',
+                decoder_chunks='改变共驻Transformer模块，输出层继续位于末端阶段'),
+            source='actual_model_configuration_and_native_megatron_boundary_module_placement',
+            scope='structural_ownership_without_measured_boundary_latency_or_padded_parameter_bytes')
         sharding = request.get('expert_sharding_strategy', request.get('fsdp_sharding_strategy'))
         shard_factor = (request.get('expert_dp_inner_size', groups['expert_dp_size'])
             if request.get('execution_backend') == 'megatron_fsdp'
@@ -128,6 +225,72 @@ def proposed_strategy_structure(parent, values, devices, model=None):
     if 'expert_dp' not in values:
         proposed.pop('expert_dp', None)
     return compare_strategy_structure(parent, proposed, devices, model)
+
+
+def complete_strategy_comparisons(parent, candidates, devices, model=None):
+    before_request = parent['plan']['backend_config']
+    before = execution_structure(before_request, devices, model)
+    parent_prediction = parent.get('prediction') or {}
+    parent_time = parent_prediction.get('performance', {}).get('step_time_ms')
+    if parent_prediction.get('prediction_status') == 'NEEDS_PROFILE':
+        parent_time = None
+    parent_execution = normalized_execution(before_request)
+    parent_keys = {item.get('cost_key') for item in
+        parent_prediction.get('evidence', {}).get('profiling_requests', []) if item.get('cost_key')}
+    rows = []
+    for trial in candidates:
+        request = trial['plan']['backend_config']
+        if any(request.get(name) != before_request.get(name) for name in WORKLOAD_FIELDS):
+            raise ValueError('完整策略比较需要相同训练负载和数值设置')
+        comparison = compare_strategy_structure(before_request, request, devices, model)
+        after = comparison['candidate']
+        prediction = trial.get('prediction') or {}
+        evidence = prediction.get('evidence', {})
+        missing = evidence.get('missing_profiles', [])
+        keys = {item.get('cost_key') for item in evidence.get('profiling_requests', [])
+            if item.get('cost_key')}
+        complete_time = prediction.get('performance', {}).get('step_time_ms')
+        if prediction.get('prediction_status') == 'NEEDS_PROFILE':
+            complete_time = None
+        measurement = trial.get('measurement') or {}
+        measured = measurement.get('status') == 'PASS' and measurement.get('performance_eligible') is True
+        candidate_execution = normalized_execution(request)
+        changes = {name: dict(before=parent_execution.get(name), after=value)
+            for name, value in candidate_execution.items() if parent_execution.get(name) != value}
+        if before_request['decoder_chunks'] != request['decoder_chunks']:
+            changes['decoder_chunks'] = dict(before=before_request['decoder_chunks'], after=request['decoder_chunks'])
+        rows.append(dict(trial_id=trial['trial_id'],
+            changed_settings=changes,
+            measured_tokens_per_second=measurement.get('tokens_per_second') if measured else None,
+            predicted_step_ms=complete_time,
+            predicted_parent_step_ms=parent_time,
+            prediction_status=prediction.get('prediction_status', 'UNKNOWN'),
+            memory_admission=prediction.get('memory', {}).get('admission', 'UNKNOWN'),
+            missing_profile_count=len(missing), missing_profiles=missing[:3],
+            execution_effects=dict(
+                parent_num_microbatches=before['num_microbatches'],
+                candidate_num_microbatches=after['num_microbatches'],
+                parent_logical_tokens_per_cp_rank=(before_request['micro_batch']
+                    * before_request['sequence'] / before_request['cp']),
+                candidate_logical_tokens_per_cp_rank=(request['micro_batch']
+                    * request['sequence'] / request['cp']),
+                logical_tokens_scope='microbatch_times_sequence_divided_by_CP_before_sequence_parallelism',
+                parent_physical_stage_layers=before['physical_stage_layers'],
+                candidate_physical_stage_layers=after['physical_stage_layers'],
+                changed_process_groups={key: dict(before=before['process_groups'].get(key), after=value)
+                    for key, value in after['process_groups'].items()
+                    if value != before['process_groups'].get(key)},
+                shared_missing_cost_count=len(keys & parent_keys),
+                shared_missing_cost_keys=sorted(keys & parent_keys)[:2],
+                candidate_only_missing_cost_count=len(keys - parent_keys),
+                candidate_only_missing_cost_keys=sorted(keys - parent_keys)[:2],
+                complete_cost_access=dict(tool='evaluate_candidate', candidate_ids=[trial['trial_id']]),
+                cost_key_scope='requested_missing_components_only',
+                scope='structural_effects_with_complete_prediction_when_available')))
+    return dict(objective='maximize_measured_throughput_under_fixed_training_contract_and_budget',
+        decision_rule='compare_complete_candidate_gains_added_costs_and_unknowns',
+        parent_bottleneck_scope='conditional_observation_of_parent_execution',
+        candidates=rows)
 
 
 def measured_strategy_memory(trials, parent, devices, limit=8, model=None):
