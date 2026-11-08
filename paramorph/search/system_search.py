@@ -40,9 +40,9 @@ from search.graph_exploration import (execution_shape, pipeline_investigations,
     exploration_representative, physical_parallel_investigations)
 from search.measurement_frontier import profile_decisions, ranking_sensitive_candidates
 from search.native_strategy_effects import native_strategy_effects
-from search.schedule_controls import schedule_control_options
-from search.experiment_value import experiment_value
-from scheduling.native_microbatches import schedule_delta
+from search.schedule_controls import effective_schedule_execution, schedule_control_options
+from search.experiment_value import budgeted_selection_values, experiment_value
+from scheduling.native_microbatches import native_schedule_settings, schedule_delta
 from agents.evidence_policy import AblationEvidencePolicy
 from search.investigation_control import InvestigationControl, PlanningInvestigationBatch
 from search.communication_placement import placement_evidence
@@ -988,7 +988,9 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
             model=self.config.agent_model, effort=self.config.agent_reasoning_effort,
             model_evidence_id=wire_id, proposals=json.loads(wire[0]) if wire else None,
             selection=checkpoint.get('selection'), constraints=checkpoint.get('constraint_decision'),
-            **({'experiment_options': checkpoint.get('budgeted_experiment_options', [])}
+            **({'experiment_options': checkpoint.get('budgeted_experiment_options', []),
+                'experiment_exclusions': checkpoint.get('budgeted_experiment_exclusions', []),
+                'experiment_selection_policy': checkpoint.get('budgeted_experiment_policy', 'v1')}
                 if self.config.budgeted_investigation_enabled else {}),
             execution_revisions=checkpoint.get('observation', {}).get('execution_revisions', []),
             candidates=[dict(candidate_id=trial['trial_id'], strategy=trial['plan']['backend_config'],
@@ -1171,10 +1173,11 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
     def compact_plan(self, trial):
         plan = trial['plan']
         request = plan['backend_config']
+        schedule = native_schedule_settings(request)
         workload_fields = ('model', 'sequence', 'global_batch', 'micro_batch', 'precision',
             'precision_aware_optimizer', 'recompute',
             'pipeline_schedule', 'optimizer_sharding', 'execution_backend',
-            'overlap_p2p', 'bucket_elements')
+            'group', 'overlap_p2p', 'batch_p2p_comm', 'overlap_p2p_comm_warmup_flush', 'bucket_elements')
         return dict(plan_id=plan['plan_id'], plan_hash=trial['plan_hash'],
             parallelism=plan['parallelism'], expert_parallelism=plan['expert_parallelism'],
             region_partition=plan['region_partition'], rank_mapping=plan['rank_mapping'],
@@ -1182,7 +1185,9 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
             memory_policy=plan['memory_policy'], state_sharding=plan.get('state_sharding', {}),
             optimizer_configuration=plan.get('optimizer_configuration', {}),
             checkpoint_policy=plan.get('checkpoint_policy', {}),
-            workload={key: request.get(key) for key in workload_fields},
+            workload={key: (schedule[key] if key in
+                ('group', 'overlap_p2p', 'batch_p2p_comm', 'overlap_p2p_comm_warmup_flush')
+                else request.get(key)) for key in workload_fields},
             process_group_sizes={key: sorted({len(group) for group in groups})
                 for key, groups in plan['process_groups']['logical'].items()})
 
@@ -3910,6 +3915,9 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
             compact_prompts = json.loads((prompt_directory / 'compact_roles.json').read_text())
             role_prompt = compact_prompts[role]
             shared_knowledge = compact_prompts['common']
+        if role == 'ExperimentInvestigationAgent' and schema.__name__ == 'BudgetedExperimentDecision':
+            role_prompt = ('你负责从options选择下一项实验，按指定JSON结构返回candidate_id和reason。'
+                '有效配置、预算、容量状态和预测分别记录；可以用合法配置的可验证变化选择探索测量。')
         instructions = role_prompt + '\n' + shared_knowledge + instructions
         instructions += '\ncolumnar_records_v1使用columns定义字段顺序，每项rows保存一条完整记录的对应字段值。'
         instructions += ('\n决策解释保持简洁：reason控制在600个中文字符以内；'
@@ -5796,7 +5804,10 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
             saved = checkpoint['budgeted_experiment_decision']
             return InvestigationSelection.model_validate(saved['review']), saved['evidence_id']
         options = checkpoint.get('budgeted_experiment_options')
+        exclusions = checkpoint.get('budgeted_experiment_exclusions', [])
+        policy = checkpoint.get('budgeted_experiment_policy', 'v1')
         if options is None:
+            policy = 'native_effective_exploration_v2'
             budget, usage = self.config.budget, self.store.usage()
             remaining = max(0, budget.max_total_gpu_hours - usage.get('gpu_hours', 0))
             world = self.topology.num_gpus
@@ -5808,48 +5819,79 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
             best = self.store.best_measured()
             best_throughput = None if best is None else best['measurement']['tokens_per_second']
             options = []
+            measured_effects = {fingerprint(effective_schedule_execution(row['plan']['backend_config']))
+                for row in history if (row.get('measurement') or {}).get('status') in
+                    ('PASS', 'CUDA_OOM', 'HOST_MEMORY_BUDGET_EXCEEDED')}
+            measured_effects.add(fingerprint(effective_schedule_execution(parent['plan']['backend_config'])))
+            offered_effects = set()
             for trial in candidates:
                 identifier = trial['trial_id']
                 if identifier not in owners or not self.available_for_joint_measurement(trial):
                     continue
                 request = trial['plan']['backend_config']
-                needs_load = request.get('execution_backend') == 'megatron_fsdp' and (
+                effect = fingerprint(effective_schedule_execution(request))
+                if effect in measured_effects or effect in offered_effects:
+                    exclusions.append(dict(candidate_id=identifier, reason='原生生效配置与已有记录相同'))
+                    continue
+                prediction = trial['prediction']
+                memory = prediction['memory']
+                training_peaks = memory.get('gpu_training_peak_per_rank_bytes', memory.get('peak_per_rank_bytes', {}))
+                predicted_over = any(value > self.topology.memory_per_gpu_gb * 2**30
+                    for value in training_peaks.values())
+                needs_load = (request.get('execution_backend') == 'megatron_fsdp' or predicted_over) and (
                     self.load_validation_summary(trial) or {}).get('status') != 'PASS'
                 action = 'LOAD_VALIDATION' if needs_load else 'BENCHMARK'
                 minimum = min(120, budget.estimated_trial_seconds) if needs_load else budget.estimated_trial_seconds
-                minimum_gpu_hours = minimum * world / 3600
-                if minimum_gpu_hours > remaining:
+                value = experiment_value(request, prediction, history, best_throughput, minimum, action=action)
+                required_hours = max(minimum * world / 3600, value['expected_gpu_hours'])
+                if required_hours > remaining:
+                    exclusions.append(dict(candidate_id=identifier, reason='预计用量超过剩余 GPU 预算',
+                        expected_gpu_hours=required_hours, remaining_gpu_hours=remaining))
                     continue
-                if needs_load and usage.get('profiling_gpu_hours', 0) + minimum_gpu_hours > budget.max_profiling_gpu_hours:
+                if needs_load and usage.get('profiling_gpu_hours', 0) + required_hours > budget.max_profiling_gpu_hours:
+                    exclusions.append(dict(candidate_id=identifier, reason='超过加载验证预算'))
                     continue
                 if not needs_load and usage.get('full_training_trials', 0) >= budget.max_full_training_trials:
+                    exclusions.append(dict(candidate_id=identifier, reason='完整训练次数用尽'))
                     continue
-                prediction = trial['prediction']
+                if (not needs_load and (value['uncertainty'] == 'UNKNOWN'
+                        or memory['admission'] != 'WITHIN_ESTIMATED_CAPACITY')
+                        and usage.get('exploration_trials', 0) >= self.config.uncalibrated_exploration_trials):
+                    exclusions.append(dict(candidate_id=identifier, reason='探索测量次数用尽'))
+                    continue
                 row = dict(candidate_id=identifier, action=action,
                     hypothesis=[strategy.intents[n].hypothesis for n in owners[identifier]],
                     effective_config=self.compact_plan(trial),
-                    memory_admission=prediction['memory']['admission'],
-                    **experiment_value(request, prediction, history, best_throughput, minimum, action=action))
+                    memory_admission=memory['admission'], **value)
                 if self.config.agent_ablation != 'without_dag_evidence':
                     row['graph_delta'] = self.compare_native_schedules(parent, request, prediction, allow_replay=False)
                 options.append(row)
-            self.store.save_round(index, budgeted_experiment_options=options)
-        values = ['DEFER', *[row['candidate_id'] for row in options]]
+                offered_effects.add(effect)
+            self.store.save_round(index, budgeted_experiment_options=options,
+                budgeted_experiment_exclusions=exclusions, budgeted_experiment_policy=policy)
+        values, first_probe = budgeted_selection_values(options,
+            gpu_execution_enabled=policy != 'v1' and self.config.gpu_execution_enabled,
+            full_training_trials=self.store.usage().get('full_training_trials', 0))
         option_evidence = dict(kind='cross_investigation_experiment_values', strategy_evidence_id=strategy_id,
             parent_trial_id=parent['trial_id'], options=options)
+        if policy != 'v1':
+            option_evidence.update(exclusions=exclusions, first_probe_required=bool(first_probe))
         option_id = fingerprint(option_evidence)
         self.store.add_evidence(option_id, 'PREDICTED', option_evidence)
         chosen, reason, decision_id = 'DEFER', '当前预算内没有可执行的调查候选', option_id
         if options:
             schema = create_model('BudgetedExperimentDecision', __base__=Contract,
                 candidate_id=(Literal[tuple(values)], ...), reason=(str, Field(min_length=1, max_length=240)))
-            observation = dict(options=options, remaining_gpu_hours=max(0,
+            observation = dict(options=options, excluded_options=exclusions, first_probe_required=bool(first_probe),
+                remaining_gpu_hours=max(0,
                 self.config.budget.max_total_gpu_hours - self.store.usage().get('gpu_hours', 0)),
                 hardware=dict(gpus=self.topology.num_gpus, memory_per_gpu_gib=self.topology.memory_per_gpu_gb))
             context_id = fingerprint(dict(role='budgeted_experiment_selection', option_id=option_id))
             instructions = ('在所有调查中比较实验价值，自主选择一次测量。预测或通过率未知时，可以根据实际'
                 '测量的信息价值选择，并说明依据。使用预算、真实反馈和当前可用的图证据。候选顺序无优先含义。'
-                'DEFER表示本轮没有值得消耗GPU的候选。')
+                'UNKNOWN是待测状态，不能写成零收益或不可执行。')
+            instructions += ('请选择一项通过配置和预算检查的探索测量，说明可验证的执行变化；缺少精确预测不影响测量资格。'
+                if first_probe else 'DEFER表示本轮没有值得消耗GPU的候选。')
             existing = self.store.connection.execute("SELECT document FROM evidence WHERE "
                 "json_extract(document, '$.kind')='budgeted_agent_selection' AND "
                 "json_extract(document, '$.context_id')=?", (context_id,)).fetchone()

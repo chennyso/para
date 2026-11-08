@@ -108,8 +108,16 @@ def download_artifact(remote, destination, expected_digest):
     targets = tuple(reversed(PODS[:2]))
     block = 4 * 1024 * 1024
     environment = cluster_environment()
-    environment['KUBECTL_REMOTE_COMMAND_WEBSOCKETS'] = 'true'
     digest = hashlib.sha256()
+    prefix = destination.with_suffix('.partial')
+    prefix_size = 0
+    if prefix.is_file() and 0 < prefix.stat().st_size < size:
+        candidate_size = prefix.stat().st_size
+        remote_digest = shared_pvc_exec('sh', '-c', 'head -c "$1" "$2" | sha256sum', 'sh',
+            candidate_size, remote).split()[0]
+        with prefix.open('rb') as stream:
+            if hashlib.file_digest(stream, 'sha256').hexdigest() == remote_digest:
+                prefix_size = candidate_size
 
     def receive(offset):
         length = min(block, size - offset)
@@ -119,33 +127,40 @@ def download_artifact(remote, destination, expected_digest):
             position = offset + len(data)
             remaining = length - len(data)
             pod = targets[(offset // block + attempts) % len(targets)]
+            requested = min(remaining, block >> min(attempts, 3))
+            transport = dict(environment, KUBECTL_REMOTE_COMMAND_WEBSOCKETS='true' if attempts % 2 == 0 else 'false')
             try:
                 result = subprocess.run(['kubectl', '--context', 'prd', '--request-timeout=40s',
                     'exec', '-n', 'default', pod, '-c', 'trainer', '--', 'dd', 'if=' + str(remote),
                     'iflag=skip_bytes,count_bytes,fullblock', 'bs=1048576', 'skip=' + str(position),
-                    'count=' + str(remaining), 'status=none'], capture_output=True, timeout=50,
-                    env=environment)
+                    'count=' + str(requested), 'status=none'], capture_output=True, timeout=50,
+                    env=transport)
             except subprocess.TimeoutExpired:
                 attempts += 1
-                if attempts == 3:
+                if attempts == 5:
                     raise
                 continue
             received = len(result.stdout)
-            if result.returncode == 0 and min(65536, remaining) <= received <= remaining:
+            if result.returncode == 0 and min(65536, requested) <= received <= requested:
                 data.extend(result.stdout)
                 attempts = 0
                 continue
             attempts += 1
-            if attempts == 3:
-                result.check_returncode()
-                raise ValueError(f'实验归档分段长度不符：偏移 {position}，预期 {remaining} 字节，收到 {received} 字节')
+            if attempts == 5:
+                detail = result.stderr.decode(errors='replace').strip()
+                raise ValueError(f'实验归档分段读取失败：偏移 {position}，请求 {requested} 字节，收到 {received} 字节；{detail}')
         return data
 
     # 逐段核对长度，防止远端命令返回成功但传输提前结束。
     with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=destination.name + '.',
             suffix='.partial', delete_on_close=False) as target, \
             concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-        for start in range(0, size, 4 * block):
+        if prefix_size:
+            with prefix.open('rb') as stream:
+                for payload in iter(lambda: stream.read(block), b''):
+                    target.write(payload)
+                    digest.update(payload)
+        for start in range(prefix_size, size, 4 * block):
             for payload in pool.map(receive, range(start, min(size, start + 4 * block), block)):
                 target.write(payload)
                 digest.update(payload)

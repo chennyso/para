@@ -9,6 +9,13 @@ WORKLOAD_FIELDS = ('model', 'checkpoint', 'data', 'training_data_contract', 'seq
 STRATUM_FIELDS = ('execution_backend', 'tp', 'pp', 'cp', 'ep', 'vpp', 'pipeline_schedule')
 
 
+def budgeted_selection_values(options, *, gpu_execution_enabled, full_training_trials):
+    ids = [row['candidate_id'] for row in options]
+    first_probe = (bool(ids) and gpu_execution_enabled and full_training_trials == 0
+        and all(row['expected_improvement_per_gpu_hour'] is None for row in options))
+    return (ids if first_probe else ['DEFER', *ids]), first_probe
+
+
 def same_condition(first, second, fields):
     return all(first.get(key) == second.get(key) for key in fields)
 

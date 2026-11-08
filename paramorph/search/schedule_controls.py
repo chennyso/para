@@ -2,7 +2,7 @@ from dataclasses import asdict
 
 from cost.runtime_calibration import configuration
 from predictor.profile_database import normalized_execution
-from scheduling.native_microbatches import native_schedule_table, valid_microbatch_group
+from scheduling.native_microbatches import native_schedule_settings, native_schedule_table, valid_microbatch_group
 
 
 def measured_schedule_parent(trial):
@@ -12,23 +12,29 @@ def measured_schedule_parent(trial):
         and request.get('execution_backend', 'megatron_ddp') == 'megatron_ddp' and request['vpp'] > 1)
 
 
-def schedule_change(parent, candidate):
-    def effective(request):
-        result = normalized_execution(request)
-        policy = asdict(configuration(request).memory_policy)
-        for field in ('activation_offload_modules', 'recompute_modules'):
-            policy[field] = tuple(policy[field])
-        result['memory_policy'] = policy
-        for field in ('backend_fingerprint', 'hardware_fingerprint'):
-            result.pop(field, None)
-        result['decoder_chunks'] = request['decoder_chunks']
-        return result
+def effective_schedule_execution(request):
+    result = normalized_execution(request)
+    policy = asdict(configuration(request).memory_policy)
+    for field in ('activation_offload_modules', 'recompute_modules'):
+        policy[field] = tuple(policy[field])
+    result['memory_policy'] = policy
+    for field in ('backend_fingerprint', 'hardware_fingerprint'):
+        result.pop(field, None)
+    schedule = native_schedule_settings(request)
+    for field in ('group', 'overlap_p2p', 'batch_p2p_comm', 'overlap_p2p_comm_warmup_flush'):
+        result[field] = schedule[field]
+    result['decoder_chunks'] = request['decoder_chunks']
+    result['recompute_num_layers'] = request.get('recompute_num_layers') if request['recompute'] == 'full' else None
+    return result
 
-    left, right = effective(parent), effective(candidate)
+
+def schedule_change(parent, candidate):
+    left, right = effective_schedule_execution(parent), effective_schedule_execution(candidate)
     changed = {field for field in left.keys() | right.keys() if left.get(field) != right.get(field)}
-    if changed in ({'group'}, {'overlap_p2p'}):
-        name = next(iter(changed))
-        return name, right[name]
+    if changed == {'group'}:
+        return 'group', right['group']
+    if 'overlap_p2p' in changed and changed <= {'overlap_p2p', 'batch_p2p_comm'}:
+        return 'overlap_p2p', right['overlap_p2p']
     return None
 
 
