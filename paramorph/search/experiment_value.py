@@ -84,12 +84,13 @@ def experiment_value(request, prediction, history, best, estimated_seconds, *, a
             validity.append(True)
         elif kind == 'ENVIRONMENT' or measured.get('execution_deadline_reached'):
             outcomes['environment'] += 1
-        elif kind == 'INVALID_MEASUREMENT' or status in ('PASS', 'VALIDATION_FAILED'):
-            outcomes['invalid_measurement'] += 1
-        elif kind in ('CAPACITY', 'NUMERICAL_CORRECTNESS', 'DETERMINISTIC_CONFIGURATION', 'CHECKPOINT_FAILURE') or status in (
+        elif kind in ('CAPACITY', 'NUMERICAL_CORRECTNESS', 'DETERMINISTIC_CONFIGURATION',
+                'EXECUTION_CONFIG_MISMATCH', 'CHECKPOINT_FAILURE') or status in (
                 'CUDA_OOM', 'HOST_MEMORY_BUDGET_EXCEEDED'):
             validity.append(False)
             outcomes['execution_failures'] += 1
+        elif kind == 'INVALID_MEASUREMENT' or status in ('PASS', 'VALIDATION_FAILED'):
+            outcomes['invalid_measurement'] += 1
         else:
             outcomes['unclassified'] += 1
         snapshot = measured.get('prediction_at_execution') or {}

@@ -63,7 +63,7 @@ class EffectiveTrainingPlan(Contract):
 
 
 class TrainingPlan(Contract):
-    identity_revision: Literal['v2', 'v3', 'v4'] = 'v2'
+    identity_revision: Literal['v2', 'v3', 'v4', 'v5'] = 'v2'
     plan_id: str
     parent_plan_id: str | None
     model_fingerprint: str
@@ -148,11 +148,18 @@ class TrainingPlan(Contract):
 
     @property
     def plan_hash(self):
-        if self.identity_revision == 'v4':
+        from ddp_overlap import DDP_OVERLAP_FIELDS
+        if self.identity_revision == 'v5':
             return self.effective_plan_hash
+        if self.identity_revision == 'v4':
+            plan = self.effective_plan
+            return plan.model_copy(update=dict(effective_config={key: value
+                for key, value in plan.effective_config.items() if key not in DDP_OVERLAP_FIELDS})).effective_plan_hash
         from predictor.profile_database import normalized_execution
         payload = self.model_dump(exclude={'plan_id', 'parent_plan_id', 'transformations', 'identity_revision'})
         payload['backend_config'] = normalized_execution(self.backend_config)
+        for key in DDP_OVERLAP_FIELDS:
+            payload['backend_config'].pop(key)
         if self.identity_revision == 'v2' and 'cuda_device_max_connections' not in self.backend_config:
             payload['backend_config']['cuda_device_max_connections'] = 1
         if payload['backend_config']['execution_backend'] == 'megatron_ddp':
@@ -340,8 +347,8 @@ class SystemConfig(Contract):
     planning_partition_engine: Literal['prefix', 'complete', 'path'] = 'prefix'
     planning_budget_allocation: Literal['equal_share', 'completion_reserve'] = 'equal_share'
     planning_execution_context_enabled: bool = False
-    planning_initial_prompt_limit: int = Field(default=10000, ge=1000)
-    agent_context_max_tokens: int = Field(default=24000, ge=1000)
+    planning_initial_prompt_limit: int | None = Field(default=10000, ge=1000)
+    agent_context_max_tokens: int | None = Field(default=24000, ge=1000)
     planning_runtime_reference: Literal['parent', 'initial'] = 'parent'
     planning_runtime_scope: Literal['open', 'fixed'] = 'open'
     planning_fixed_parent_id: str | None = None

@@ -9,6 +9,7 @@ import time
 from contracts import fingerprint
 from core_data_models import LayerType, Task, TaskType
 from cost.runtime_calibration import configuration
+from ddp_overlap import DDP_OVERLAP_FIELDS
 from graph.process_groups import process_groups
 from graph.recompute_effect import resolve_recompute_effect
 from predictor.profile_database import normalized_execution, plan_signature, same_training_plan
@@ -34,7 +35,7 @@ OPTIMIZER_PROFILE_FIELDS = (
     'model', 'checkpoint', 'optimizer', 'optimizer_config', 'optimizer_sharding',
     'execution_backend', 'precision', 'precision_aware_optimizer',
     'main_grads_dtype', 'main_params_dtype', 'exp_avg_dtype', 'exp_avg_sq_dtype',
-    'offload', 'optimizer_offload_fraction', 'optimizer_transfer_overlap', 'clip_grad',
+    'offload', 'optimizer_offload_fraction', 'optimizer_transfer_overlap', 'clip_grad', *DDP_OVERLAP_FIELDS,
 )
 
 
@@ -662,6 +663,7 @@ class DAGProjector:
             encoded = self.compute_surface.database.connection.execute(
                 'SELECT document FROM profiles WHERE id=?', (row['profile_id'],)).fetchone()
             document = json.loads(encoded[0])
+            document['request'] = self.compute_surface.database.profile_request(document)
             document['measurement_semantics'] = row['measurement_semantics']
             document['backend_identity_evidence'] = row['backend_identity_evidence']
             previous = document['request']
@@ -693,9 +695,7 @@ class DAGProjector:
                         for row in self.topology.devices if row.get('uuid', row.get('gpu_uuid')) is not None}
         target_key = optimizer_profile_key(request)
         candidates = []
-        for identifier, encoded in self.compute_surface.database.connection.execute(
-                'SELECT id, document FROM profiles ORDER BY id'):
-            document = json.loads(encoded)
+        for identifier, document in self.compute_surface.database.measured_profiles():
             if self.blind and same_training_plan(document['request'], request):
                 continue
             if document.get('optimizer_component_costs') is None:

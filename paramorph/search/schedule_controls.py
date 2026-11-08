@@ -41,7 +41,8 @@ def schedule_change(parent, candidate):
 def coordinate_axes(parent, candidate):
     left, right = effective_schedule_execution(parent), effective_schedule_execution(candidate)
     fields = ('tp', 'pp', 'cp', 'ep', 'etp', 'dp', 'vpp', 'micro_batch', 'group',
-        'decoder_chunks', 'recompute', 'overlap_p2p', 'bucket_elements', 'rank_mapping',
+        'decoder_chunks', 'recompute', 'overlap_p2p', 'overlap_grad_reduce', 'overlap_param_gather',
+        'bucket_elements', 'rank_mapping',
         'execution_backend', 'optimizer_sharding', 'optimizer_offload_fraction',
         'precision_aware_optimizer', 'memory_policy')
     changed = {key for key in fields if left.get(key) != right.get(key)}

@@ -27,6 +27,10 @@ Agent 共享 TrainingPlan、Executable DAG、GraphDelta、Evidence、成本版�
 
 训练重试通过 `SystemConfig.training_retries` 配置，以候选编号为键。每项记录填写 `failed_run_id`、`resolved_condition`、`evidence_reference` 与 `reason`，分别指向失败运行、已经解决的重试条件、新证据和处理经过。环境故障、无效测量、待调查故障分别使用 `requires_changed_environment`、`requires_changed_measurement`、`requires_investigation`。重试生成独立运行编号，保留原始运行和逐次费用。确定性执行错误和数值错误需要提交生效配置有相关变化的新候选。
 
+`overlap_grad_reduce` 和 `overlap_param_gather` 参与有效配置、候选去重和成本匹配。训练启动与结果采集分别核验两个开关。配置不符时记录 `EXECUTION_CONFIG_MISMATCH`，保存请求值、各 Rank 实际值和运行源码摘要。
+
+需要加载验证的候选可以选择 `LOAD_VALIDATION_THEN_BENCHMARK`。控制器在执行前同时预留两个动作的预算，验证通过后才启动正式训练。逐轮回执记录候选来源、保留和筛选状态，以及对应的证据编号。
+
 盲测排序验收使用 `experiments/evaluate_prediction_pairs.py`。`independent_repeat_block` 标记相同工作负载和成本版本下的独立配对重复；同一次训练内的多步计时不能分别作为独立重复。至少三个完整配对才计算步时差的 95% 区间。区间覆盖零的比较和重复不足的比较单独标记，排序准确率以可区分的候选对计算。
 
 ## 条件化联合搜索

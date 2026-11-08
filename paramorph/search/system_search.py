@@ -18,6 +18,7 @@ import tiktoken
 from openai.lib._pydantic import to_strict_json_schema
 
 from contracts import Contract, ModuleRelation, ProfilingRequest, RewriteIntent, SystemConfig, TrainingPlan, fingerprint
+from ddp_overlap import DDP_OVERLAP_FIELDS, resolve_ddp_overlap
 from agents.single_round import ScopeRoundDecision, ScopeRow
 from core_data_models import HardwareTopology, MemoryPolicy
 from graph.capability_registry import CapabilityRegistry, tensor_parallel_limit
@@ -56,7 +57,7 @@ from graph.process_groups import process_groups
 from graph.native_recomputation import selective_modules
 from graph.execution_impact import execution_impact
 from predictor.profile_database import (signature, plan_signature, same_training_plan, effective_execution_config,
-    normalized_execution)
+    normalized_execution, observed_ddp_overlap)
 from search.training_semantics import require_fixed_training_semantics
 from predictor.state_sharding import state_sharding_config
 from memory_failure import oom_allocation_site, write_memory_failure_witness
@@ -1022,7 +1023,8 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
         wire = (self.store.connection.execute('SELECT document FROM evidence WHERE id=?',
             (wire_id,)).fetchone() if wire_id else None)
         measured = set(checkpoint.get('measured_candidate_ids', []))
-        candidates = set(checkpoint.get('candidate_ids', [])) | measured
+        portfolio = {row['candidate_id']: row for row in checkpoint.get('portfolio_candidate_records', [])}
+        candidates = set(checkpoint.get('candidate_ids', [])) | measured | set(portfolio)
         document = dict(round=checkpoint['round_index'] + 1, variant=self.config.agent_ablation,
             model=self.config.agent_model, effort=self.config.agent_reasoning_effort,
             model_evidence_id=wire_id, proposals=json.loads(wire[0]) if wire else None,
@@ -1038,8 +1040,19 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
             actual_cost=checkpoint['call_cost_report'], stop_reason=checkpoint.get('stop_reason'))
         if self.config.budgeted_investigation_enabled:
             by_id = {row['candidate_id']: row for row in document['experiment_options']}
+            exclusions = {row['candidate_id']: row for row in document['experiment_exclusions']}
+            review = document['selection'] or {}
+            selected = set(review.get('accepted_candidate_ids', [])) | set(review.get('load_validation_candidate_ids', []))
             for row in document['candidates']:
                 option = by_id.get(row['candidate_id'])
+                retained = portfolio.get(row['candidate_id'], {})
+                excluded = exclusions.get(row['candidate_id']) or retained.get('exclusion_reason')
+                if 'portfolio_candidate_records' in checkpoint:
+                    row.update(retained, measurement_eligibility=('OFFERED' if option else
+                        'NOT_ELIGIBLE' if excluded else 'NOT_OFFERED'),
+                        exclusion_reason=excluded,
+                        selection_status=('SELECTED' if row['candidate_id'] in selected else
+                            'NOT_SELECTED' if option else 'FILTERED' if excluded else 'NOT_OFFERED'))
                 result = row['measurement'] or {}
                 if not option or not row['measured_this_round'] or not result.get('performance_eligible'):
                     continue
@@ -1216,7 +1229,9 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
         workload_fields = ('model', 'sequence', 'global_batch', 'micro_batch', 'precision',
             'precision_aware_optimizer', 'recompute',
             'pipeline_schedule', 'optimizer_sharding', 'execution_backend',
-            'group', 'overlap_p2p', 'batch_p2p_comm', 'overlap_p2p_comm_warmup_flush', 'bucket_elements')
+            'group', 'overlap_p2p', 'batch_p2p_comm', 'overlap_p2p_comm_warmup_flush', 'bucket_elements',
+            *DDP_OVERLAP_FIELDS)
+        ddp_settings = resolve_ddp_overlap(request)
         return dict(plan_id=plan['plan_id'], plan_hash=trial['plan_hash'],
             parallelism=plan['parallelism'], expert_parallelism=plan['expert_parallelism'],
             region_partition=plan['region_partition'], rank_mapping=plan['rank_mapping'],
@@ -1226,7 +1241,7 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
             checkpoint_policy=plan.get('checkpoint_policy', {}),
             workload={key: (schedule[key] if key in
                 ('group', 'overlap_p2p', 'batch_p2p_comm', 'overlap_p2p_comm_warmup_flush')
-                else request.get(key)) for key in workload_fields},
+                else ddp_settings.get(key, request.get(key))) for key in workload_fields},
             process_group_sizes={key: sorted({len(group) for group in groups})
                 for key, groups in plan['process_groups']['logical'].items()})
 
@@ -3908,7 +3923,7 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
         sharding = state_sharding_config(request, config)
         stored = self.store.connection.execute('SELECT document FROM trials WHERE id=?',
             (request['run_id'],)).fetchone()
-        revision = json.loads(stored[0])['plan'].get('identity_revision', 'v2') if stored else 'v4'
+        revision = json.loads(stored[0])['plan'].get('identity_revision', 'v2') if stored else 'v5'
         return TrainingPlan(identity_revision=revision, plan_id=request['run_id'], parent_plan_id=parent,
             model_fingerprint=self.model_graph['model_fingerprint'],
             hardware_fingerprint=fingerprint(self.hardware_identity),
@@ -4024,18 +4039,23 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
             visible = compact_role_observation(role, visible)
         visible['ablation_contract'] = policy.contract
         specification = to_strict_json_schema(schema)
-        input_limit = (min(self.config.planning_initial_prompt_limit, self.config.agent_context_max_tokens)
-            if context_metric['tool_round'] == 0 else self.config.agent_context_max_tokens)
+        input_limits = [self.config.agent_context_max_tokens]
+        if context_metric['tool_round'] == 0:
+            input_limits.append(self.config.planning_initial_prompt_limit)
+        input_limit = min((value for value in input_limits if value is not None), default=None)
         if issubclass(schema, NativeScopeRoundDecision):
             legacy_schema_tokens = token_count(to_strict_json_schema(ScopeRoundDecision))
-            input_limit += max(0, token_count(specification) - legacy_schema_tokens)
+            if input_limit is not None:
+                input_limit += max(0, token_count(specification) - legacy_schema_tokens)
             if self.config.agent_token_budget_enabled:
-                input_limit = min(self.config.round_input_token_limit, input_limit)
+                input_limit = self.config.round_input_token_limit if input_limit is None else min(
+                    self.config.round_input_token_limit, input_limit)
         fixed_tokens = token_count(instructions) + token_count(specification) + 256
-        if fixed_tokens >= input_limit:
+        if input_limit is not None and fixed_tokens >= input_limit:
             raise ValueError(dict(status='CONTEXT_SCHEMA_BUDGET_EXCEEDED',
                 instruction_and_schema_tokens=fixed_tokens, input_limit=input_limit))
-        visible, packing = pack_context(visible, input_limit - fixed_tokens, token_count)
+        observation_limit = None if input_limit is None else input_limit - fixed_tokens
+        visible, packing = pack_context(visible, observation_limit, token_count)
         visible = self.visible_observation(visible)
         prompt = ('Use only the supplied observation. Request backend tools through the JSON tool_requests field. '
                   'Do not access files, edit source code, or invent measurements. '
@@ -4053,11 +4073,12 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
             cumulative_tool_return_tokens=context_metric['cumulative_tool_return_tokens'],
             cumulative_estimated_context_tokens=context_metric['cumulative_estimated_context_tokens']
                 + estimated_prompt_tokens)
-        if estimated_prompt_tokens + metric['strict_schema_tokens'] > input_limit:
+        if input_limit is not None and estimated_prompt_tokens + metric['strict_schema_tokens'] > input_limit:
             raise ValueError(f'Agent Prompt与严格Schema合计超过{input_limit} tokens：'
                 f'{estimated_prompt_tokens + metric["strict_schema_tokens"]}')
-        remaining_tokens = (int(self.config.budget.max_agent_tokens - usage.get('agent_input_tokens', 0)
-                               - usage.get('agent_output_tokens', 0)) if self.config.agent_token_budget_enabled else 32768)
+        max_output_tokens = (max(1, min(32768, int(self.config.budget.max_agent_tokens
+            - usage.get('agent_input_tokens', 0) - usage.get('agent_output_tokens', 0))))
+            if self.config.agent_token_budget_enabled else None)
         audit = dict(timestamp=datetime.now(timezone.utc).isoformat(), role=role,
             cli_context_profile=self.config.agent_cli_context_profile,
             execution_evidence_format=self.config.execution_evidence_format,
@@ -4078,7 +4099,7 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
                 response, provenance = self.provider.generate(provider_role, instructions, visible, schema,
                     on_start=lambda identifier: self.charge_agent_attempt(identifier, provider_role, context_metric['context_id']),
                     on_finish=lambda identifier, seconds: self.store.charge(identifier + ':seconds', 'llm_seconds', seconds),
-                    on_usage=self.charge_agent_usage, max_output_tokens=max(1, min(32768, remaining_tokens)))
+                    on_usage=self.charge_agent_usage, max_output_tokens=max_output_tokens)
                 break
             except ValidationError as error:
                 failure = dict(status='SCHEMA_REVISION_REQUIRED', revision_owner=role,
@@ -4088,7 +4109,7 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
                 if output_revision == 2:
                     raise
                 visible = dict(visible, schema_validation_feedback=failure)
-                visible, packing = pack_context(visible, input_limit - fixed_tokens, token_count)
+                visible, packing = pack_context(visible, observation_limit, token_count)
             except subprocess.TimeoutExpired:
                 self.check_walltime()
                 raise
@@ -4862,6 +4883,7 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
                     if len(values) != 1:
                         raise ValueError('Baseline各Rank的Optimizer状态精度不同：' + field)
                     bound[field + '_dtype'] = values.pop()
+                bound.update(observed_ddp_overlap(directory / 'artifacts', self.topology.num_gpus))
                 measured_request = dict(measured_request, **bound)
                 self.store.add_search_state('BASELINE_RUNTIME_BINDING', dict(
                     source='current_baseline_actual_rank_manifests', run_id=measured_request['run_id'],
@@ -4870,6 +4892,25 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
             persisted_measurement = initial_trial.get('measurement')
             baseline_measurement = (verified['result'] if verified is not None
                 else json.loads((directory / 'result.json').read_text()))
+            expected_execution = effective_execution_config(initial_request)
+            measured_execution = effective_execution_config(measured_request)
+            differing = {name for name in expected_execution.keys() | measured_execution.keys()
+                if expected_execution.get(name) != measured_execution.get(name)}
+            if (differing and differing <= set(DDP_OVERLAP_FIELDS)
+                    and baseline_measurement['status'] == 'PASS' and baseline_measurement['performance_eligible']
+                    and 'ddp_overlap.py' not in baseline_measurement.get('source_hashes', {})
+                    and all(path.is_file() for path in manifests)):
+                observed = {key: measured_execution[key] for key in DDP_OVERLAP_FIELDS}
+                alias = initial_plan.plan_id + '-as-run-' + fingerprint(observed)[:10]
+                original_trial_id = initial_trial['trial_id']
+                measured_plan = self.plan(dict(measured_request, run_id=alias))
+                initial_plan = measured_plan
+                initial_request = measured_plan.backend_config
+                initial_trial, _ = self.store.put_trial(measured_plan, hypothesis=dict(
+                    kind='verified_historical_baseline_effective_configuration',
+                    original_trial_id=original_trial_id, observed_ddp_overlap=observed))
+                self.store.update_trial(original_trial_id, measurement_reuse=dict(
+                    status='HISTORICAL_AS_RUN_ALIAS', effective_trial_id=initial_trial['trial_id']))
             if (persisted_measurement is not None
                     and {key: value for key, value in persisted_measurement.items()
                         if key != 'memory_failure_witness'} == baseline_measurement
@@ -5390,7 +5431,7 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
             self.store.update_profile_request(request['request_id'], result=dict(request['result'],
                 refreshed_trial_ids=sorted(completed)))
 
-    def execute_load_validation(self, trial):
+    def execute_load_validation(self, trial, *, reserved_seconds=None):
         if self.prepare_only:
             raise ValueError('首轮预规划阶段不执行GPU加载验证')
         current = trial.get('validation') or {}
@@ -5418,6 +5459,8 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
                     (budget.max_total_gpu_hours - usage.get('gpu_hours', 0)) * 3600 / world - 10,
                     (budget.max_profiling_gpu_hours - usage.get('profiling_gpu_hours', 0)) * 3600 / world - 10,
                     budget.max_walltime_seconds - self.store.search_seconds() - 15)))
+        if reserved_seconds is not None:
+            request['max_allocation_seconds'] = min(request['max_allocation_seconds'], reserved_seconds)
         if stored.is_file():
             request['max_allocation_seconds'] = json.loads(stored.read_text())['max_allocation_seconds']
         result, directory = self.execute_receipted(request,
@@ -5444,6 +5487,35 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
             state='LOAD_VALIDATED' if result['status'] == 'PASS' else 'FAILED',
             failure=witness)
         return result
+
+    def execute_load_then_benchmark(self, trial, limits, *, exploration=False):
+        retry = trial.get('training_retry') or {}
+        identity = retry.get('execution_id', trial['plan_hash'])
+        run_id = retry.get('run_id', trial['plan']['backend_config']['run_id'])
+        load_id = identity + ':load-validation'
+        completed = (self.load_validation_summary(trial) or {}).get('status') == 'PASS'
+        validation_seconds, benchmark_seconds = limits['validation_seconds'], limits['benchmark_seconds']
+        world = self.topology.num_gpus
+        budget = self.config.budget
+        reservations = [(identity, self.execution_directory(run_id).name,
+            'benchmark', benchmark_seconds * world / 3600)]
+        if not completed:
+            reservations.append((load_id, self.execution_directory(run_id + '-load-validation').name,
+                'validation', validation_seconds * world / 3600))
+        if not self.store.reserve_gpu_execution_group(reservations,
+                budget.max_total_gpu_hours, budget.max_profiling_gpu_hours):
+            self.store.update_trial(trial['trial_id'], state='OUT_OF_BUDGET')
+            return None
+        try:
+            validation = self.execute_load_validation(trial, reserved_seconds=validation_seconds)
+            if validation['status'] != 'PASS':
+                return None
+            trial = next(row for row in self.store.trials() if row['trial_id'] == trial['trial_id'])
+            return self.execute_trial(trial, exploration=exploration, reserved_seconds=benchmark_seconds)
+        finally:
+            for key, actual in ((load_id, run_id + '-load-validation'), (identity, run_id)):
+                if not (self.execution_directory(actual) / 'allocation.json').is_file():
+                    self.store.release_gpu_execution(key)
 
     def execution_directory(self, run_id, *, profile=False):
         namespaced = run_id + ('-' + self.config.run_namespace if self.config.run_namespace else '')
@@ -5506,7 +5578,7 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
                     retry or started or trial['state'] == 'RUNNING'):
                 self.execute_trial(trial, exploration=self.store.charged(execution_id + ':exploration') is not None)
 
-    def execute_trial(self, trial, exploration=False):
+    def execute_trial(self, trial, exploration=False, *, reserved_seconds=None):
         if self.prepare_only:
             raise ValueError('首轮预规划阶段不执行GPU训练')
         if trial['measurement'] is not None:
@@ -5563,6 +5635,8 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
         request['max_allocation_seconds'] = min(remaining_search_seconds,
             remaining_gpu_seconds if declared_trial_seconds is None
             else min(declared_trial_seconds, remaining_gpu_seconds))
+        if reserved_seconds is not None:
+            request['max_allocation_seconds'] = min(request['max_allocation_seconds'], reserved_seconds)
         if (trial['prediction'] is not None
                 and trial['prediction']['plan_signature'] != plan_signature(request)):
             candidate = self.rewriter.candidate(trial['plan']['backend_config'])
@@ -5777,7 +5851,17 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
                     else 'PORTFOLIO_LIMIT'),
                 prediction_id=(row.get('prediction') or {}).get('prediction_id'))
                 for row in candidates if row not in selected])
-        self.store.add_evidence(fingerprint(evidence), 'PREDICTED', evidence)
+        identifier = fingerprint(evidence)
+        self.store.add_evidence(identifier, 'PREDICTED', evidence)
+        self.last_portfolio_candidate_records = [dict(candidate_id=row['trial_id'],
+            candidate_origin=('AGENT' if row['trial_id'] in proposal_candidate_ids else
+                (row.get('rewrite') or {}).get('candidate_source') or 'HISTORY'),
+            constraint_status=(row.get('validation') or {}).get('status', 'COMPILED'),
+            prediction_status=(row.get('prediction') or {}).get('prediction_status', 'NOT_PREDICTED'),
+            portfolio_status='RETAINED' if row in selected else 'EXCLUDED',
+            exclusion_reason=next((dict(reason=entry['reason'], evidence_id=identifier)
+                for entry in evidence['rejected_candidates'] if entry['trial_id'] == row['trial_id']), None))
+            for row in candidates]
         return selected
 
     def selection_metrics(self, candidates):
@@ -5980,7 +6064,7 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
         exclusions = checkpoint.get('budgeted_experiment_exclusions', [])
         policy = checkpoint.get('budgeted_experiment_policy', 'v1')
         if options is None:
-            policy = 'native_effective_exploration_v2'
+            policy = 'native_effective_exploration_v3'
             budget, usage = self.config.budget, self.store.usage()
             remaining = max(0, budget.max_total_gpu_hours - usage.get('gpu_hours', 0))
             world = self.topology.num_gpus
@@ -5993,17 +6077,29 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
             best_throughput = None if best is None else best['measurement']['tokens_per_second']
             options = []
             measured_effects = {fingerprint(effective_schedule_execution(row['plan']['backend_config']))
-                for row in history if (row.get('measurement') or {}).get('status') in
+                for row in history if (row.get('measurement_reuse') or {}).get('status') != 'HISTORICAL_AS_RUN_ALIAS' and ((row.get('measurement') or {}).get('status') in
                     ('PASS', 'CUDA_OOM', 'HOST_MEMORY_BUDGET_EXCEEDED')
                 or (row.get('failure') or {}).get('retry_eligibility') == 'requires_changed_execution'
                 or ((self.load_validation_summary(row) or {}).get('status') in
                     ('FAILED', 'CUDA_OOM', 'HOST_MEMORY_BUDGET_EXCEEDED')
-                    and (row.get('failure') or {}).get('failure_type') != 'ENVIRONMENT')}
+                    and (row.get('failure') or {}).get('failure_type') != 'ENVIRONMENT'))}
             measured_effects.add(fingerprint(effective_schedule_execution(parent['plan']['backend_config'])))
             offered_effects = set()
+            origins = {row['candidate_id']: row['candidate_origin']
+                for row in checkpoint.get('portfolio_candidate_records', [])}
             for trial in candidates:
                 identifier = trial['trial_id']
-                if identifier not in owners or not self.available_for_joint_measurement(trial):
+                if not self.available_for_joint_measurement(trial):
+                    admission = (trial.get('prediction') or {}).get('memory', {}).get('admission')
+                    exclusions.append(dict(candidate_id=identifier, reason=(
+                        'ALREADY_MEASURED' if trial.get('measurement') is not None else
+                        'PREVIOUS_FAILURE' if trial.get('failure') else 'REJECT_OOM' if admission == 'REJECT_OOM'
+                        else 'LOAD_VALIDATION_FAILED'),
+                        evidence_id=(trial.get('failure') or {}).get('witness_id') or
+                            (trial.get('prediction') or {}).get('prediction_id')))
+                    continue
+                if trial.get('prediction') is None:
+                    exclusions.append(dict(candidate_id=identifier, reason='NOT_PREDICTED'))
                     continue
                 request = trial['plan']['backend_config']
                 if self.config.agent_ablation == 'without_joint_search':
@@ -6026,25 +6122,50 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
                 minimum = min(120, budget.estimated_trial_seconds) if needs_load else budget.estimated_trial_seconds
                 value = experiment_value(request, prediction, history, best_throughput, minimum, action=action)
                 required_hours = max(minimum * world / 3600, value['expected_gpu_hours'])
+                chained = None
+                if needs_load:
+                    load_seconds = min(self.config.fsdp_load_validation_seconds,
+                        request.get('max_allocation_seconds', self.config.fsdp_load_validation_seconds))
+                    benchmark_value = experiment_value(request, prediction, history, best_throughput,
+                        budget.estimated_trial_seconds)
+                    benchmark_seconds = max(budget.estimated_trial_seconds,
+                        math.ceil(benchmark_value['expected_gpu_hours'] * 3600 / world))
+                    declared = request.get('max_allocation_seconds')
+                    if declared is not None:
+                        benchmark_seconds = min(benchmark_seconds, declared)
+                    chained = dict(validation_seconds=load_seconds, benchmark_seconds=benchmark_seconds)
+                    required_hours = (load_seconds + benchmark_seconds) * world / 3600
+                    load_probability, benchmark_probability = value['p_valid'], benchmark_value['p_valid']
+                    probability = (load_probability * benchmark_probability
+                        if load_probability is not None and benchmark_probability is not None else None)
+                    gain = benchmark_value['expected_gain']
+                    value = dict(benchmark_value, expected_gpu_hours=required_hours, p_valid=probability,
+                        validation_pass_probability=load_probability,
+                        expected_improvement_per_gpu_hour=(probability * gain / required_hours
+                            if probability is not None and gain is not None else None))
+                    action = 'LOAD_VALIDATION_THEN_BENCHMARK'
                 if required_hours > remaining:
                     exclusions.append(dict(candidate_id=identifier, reason='预计用量超过剩余 GPU 预算',
                         expected_gpu_hours=required_hours, remaining_gpu_hours=remaining))
                     continue
-                if needs_load and usage.get('profiling_gpu_hours', 0) + required_hours > budget.max_profiling_gpu_hours:
+                if needs_load and usage.get('profiling_gpu_hours', 0) + chained['validation_seconds'] * world / 3600 > budget.max_profiling_gpu_hours:
                     exclusions.append(dict(candidate_id=identifier, reason='超过加载验证预算'))
                     continue
-                if not needs_load and usage.get('full_training_trials', 0) >= budget.max_full_training_trials:
+                if usage.get('full_training_trials', 0) >= budget.max_full_training_trials:
                     exclusions.append(dict(candidate_id=identifier, reason='完整训练次数用尽'))
                     continue
-                if (not needs_load and (value['uncertainty'] == 'UNKNOWN'
+                if ((value['uncertainty'] == 'UNKNOWN'
                         or memory['admission'] != 'WITHIN_ESTIMATED_CAPACITY')
                         and usage.get('exploration_trials', 0) >= self.config.uncalibrated_exploration_trials):
                     exclusions.append(dict(candidate_id=identifier, reason='探索测量次数用尽'))
                     continue
                 row = dict(candidate_id=identifier, action=action,
-                    hypothesis=[strategy.intents[n].hypothesis for n in owners[identifier]],
+                    hypothesis=[strategy.intents[n].hypothesis for n in owners.get(identifier, [])],
+                    candidate_origin=origins.get(identifier, 'HISTORY'),
                     effective_config=self.compact_plan(trial),
                     memory_admission=memory['admission'], **value)
+                if chained is not None:
+                    row['conditional_execution'] = chained
                 if not AblationEvidencePolicy(self.config.agent_ablation).without_graph:
                     row['graph_delta'] = self.compare_native_schedules(parent, request, prediction, allow_replay=False)
                 options.append(row)
@@ -6112,8 +6233,8 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
                     candidate_id=chosen, reason=reason, decision_id=decision_id)
                 self.store.add_evidence(fingerprint(receipt), 'PREDICTED', receipt)
         selected = next((row for row in options if row['candidate_id'] == chosen), None)
-        train = [chosen] if selected and selected['action'] == 'BENCHMARK' else []
-        validate = [chosen] if selected and selected['action'] == 'LOAD_VALIDATION' else []
+        train = [chosen] if selected and selected['action'] in ('BENCHMARK', 'LOAD_VALIDATION_THEN_BENCHMARK') else []
+        validate = [chosen] if selected and selected['action'] in ('LOAD_VALIDATION', 'LOAD_VALIDATION_THEN_BENCHMARK') else []
         profiles = [chosen] if selected and selected['action'] == 'PROFILE' else []
         review = InvestigationSelection(accepted_candidate_ids=train, load_validation_candidate_ids=validate,
             accepted_profiling_request_ids=profiles,
@@ -6761,8 +6882,15 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
                 self.config.budget.max_candidates_per_round, parent=best if full_agents else None,
                 proposal_candidate_ids=([identifier for entry in checkpoint['constraint_decision']['intent_results']
                     for identifier in entry['candidate_ids']] if self.config.single_decision_round else ()))
+            global_ids = set(checkpoint.get('global_family_candidate_ids', []))
+            portfolio_records = {row['candidate_id']: row for row in checkpoint.get('portfolio_candidate_records', [])}
+            portfolio_records.update({row['candidate_id']: dict(row,
+                candidate_origin='GLOBAL_FAMILY' if row['candidate_id'] in global_ids
+                    and row['candidate_origin'] != 'AGENT' else row['candidate_origin'])
+                for row in self.last_portfolio_candidate_records})
             checkpoint = self.store.save_round(round_index, candidates_complete=True,
-                candidate_ids=[trial['trial_id'] for trial in candidates], stage='SELECTION')
+                candidate_ids=[trial['trial_id'] for trial in candidates],
+                portfolio_candidate_records=list(portfolio_records.values()), stage='SELECTION')
             if not candidates:
                 self.complete_round(round_index, best, no_improvement=no_improvement,
                     stop_reason='当前轮次没有新增可执行候选')
@@ -6984,6 +7112,9 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
             selected = [by_id[identifier] for identifier in review.accepted_candidate_ids]
             training_validated = [identifier for identifier in review.load_validation_candidate_ids
                 if identifier in review.accepted_candidate_ids]
+            conditional = {row['candidate_id']: row['conditional_execution']
+                for row in self.store.get_round(round_index).get('budgeted_experiment_options', [])
+                if row.get('action') == 'LOAD_VALIDATION_THEN_BENCHMARK' and row['candidate_id'] in training_validated}
             if training_validated:
                 self.store.add_search_state('CHECKPOINT_VALIDATION_IN_TRAINING', dict(
                     candidate_ids=training_validated,
@@ -6991,24 +7122,29 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
                     checks=['native_checkpoint_load', 'finite_loss', 'finite_gradient_norm',
                             'successful_optimizer_updates']))
             load_validations = {identifier: self.execute_load_validation(by_id[identifier])
-                for identifier in review.load_validation_candidate_ids}
+                for identifier in review.load_validation_candidate_ids if identifier not in conditional}
             selected = [next(row for row in self.store.trials() if row['trial_id'] == trial['trial_id'])
                         for trial in selected]
             for trial in selected:
                 if len(measured) >= self.config.budget.max_benchmarks_per_round:
                     break
                 exploration = trial['trial_id'] in review.exploration_candidate_ids
+                previously_measured = trial.get('measurement') is not None
                 if (trial['trial_id'] in load_validations
                         and load_validations[trial['trial_id']]['status'] != 'PASS'):
                     continue
                 if trial['prediction']['memory']['admission'] == 'REJECT_OOM':
+                    continue
+                if trial['trial_id'] in conditional:
+                    result = self.execute_load_then_benchmark(trial, conditional[trial['trial_id']], exploration=exploration)
+                    if result is not None and not previously_measured:
+                        measured.append(result)
                     continue
                 if (trial['prediction']['memory']['admission'] != 'WITHIN_ESTIMATED_CAPACITY'
                         and not exploration
                         and trial['plan']['backend_config'].get(
                             'execution_backend', 'megatron_ddp') == 'megatron_fsdp'):
                     continue
-                previously_measured = trial.get('measurement') is not None
                 result = self.execute_trial(trial, exploration=exploration)
                 if result and not previously_measured:
                     measured.append(result)

@@ -1,10 +1,13 @@
 from contracts import fingerprint
+from ddp_overlap import DDP_OVERLAP_FIELDS
 from predictor.profile_database import effective_execution_config
 from scheduling.native_microbatches import verify_native_schedule
 
 
 class RuntimeReceiptError(ValueError):
-    pass
+    def __init__(self, message, *, mismatch=None):
+        super().__init__(message)
+        self.mismatch = mismatch
 
 
 def effective_runtime_receipt(request, source_hashes, manifests):
@@ -14,6 +17,17 @@ def effective_runtime_receipt(request, source_hashes, manifests):
         raise RuntimeReceiptError('逐 Rank 回执未覆盖全部设备')
     if any(row.get('world') != world for row in manifests):
         raise RuntimeReceiptError('逐 Rank 回执的设备总数不同')
+    if any('rank' in row for row in manifests) and {row.get('rank') for row in manifests} != set(range(world)):
+        raise RuntimeReceiptError('逐 Rank 回执的设备编号缺失或重复')
+    ddp_mismatches = []
+    for name in DDP_OVERLAP_FIELDS:
+        if name not in request and 'ddp_overlap.py' not in source_hashes:
+            continue
+        values = {str(row.get('rank', index)): row.get(name) for index, row in enumerate(manifests)}
+        if any(value is not expected[name] for value in values.values()):
+            ddp_mismatches.append(dict(field=name, requested=expected[name], actual_by_rank=values))
+    if ddp_mismatches:
+        raise RuntimeReceiptError('原生 DDP 重叠开关与请求不同', mismatch=ddp_mismatches)
     fields = ('tp', 'pp', 'cp', 'dp', 'ep', 'etp', 'vpp', 'expert_dp', 'params_dtype',
         'sequence', 'micro_batch', 'global_batch', 'optimizer_sharding', 'optimizer_pin_cpu_params',
         'optimizer_cpu_copy_mode',
@@ -69,7 +83,7 @@ def effective_runtime_receipt(request, source_hashes, manifests):
             ['mlp'] if request['recompute'] == 'selective-mlp' else [])
         if sorted(observed.get('recompute_modules') or []) != sorted(modules):
             raise RuntimeReceiptError('原生选择性重计算模块与请求不同')
-    for name in ('overlap_grad_reduce', 'overlap_param_gather', 'precision_aware_optimizer'):
+    for name in ('precision_aware_optimizer',):
         if name in request and updates.get(name) != request[name]:
             raise RuntimeReceiptError(f'原生优化器设置缺失或与请求不同：{name}')
     effective = expected | updates
@@ -84,5 +98,8 @@ def validate_training_result(record, request, source_hashes, manifests):
         receipt = effective_runtime_receipt(request, source_hashes, manifests)
     except RuntimeReceiptError as error:
         record.update(status='VALIDATION_FAILED', performance_eligible=False, runtime_validation_error=str(error))
+        if error.mismatch is not None:
+            record.update(runtime_validation_kind='EXECUTION_CONFIG_MISMATCH',
+                runtime_config_mismatch=error.mismatch)
     else:
         record.update(receipt)

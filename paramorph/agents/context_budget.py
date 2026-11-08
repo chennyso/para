@@ -102,6 +102,8 @@ def columnar_records(value):
 
 
 def pack_context(observation, maximum_tokens, count_tokens):
+    if maximum_tokens is None:
+        maximum_tokens = float('inf')
     context = deepcopy(observation)
     deferred = []
     prior = context.get('prior_episode')

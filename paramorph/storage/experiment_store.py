@@ -156,29 +156,42 @@ class ExperimentStore:
         self.connection.commit()
 
     def reserve_gpu_execution(self, identity, run_id, category, hours, total_limit, profiling_limit):
-        if (category not in ('profiling', 'validation', 'benchmark')
-                or not all(math.isfinite(value) and value > 0 for value in (hours, total_limit))
-                or not math.isfinite(profiling_limit) or profiling_limit < 0):
-            raise ValueError('GPU 预留需要有效类别、用量和预算')
+        return self.reserve_gpu_execution_group([(identity, run_id, category, hours)], total_limit, profiling_limit)
+
+    def reserve_gpu_execution_group(self, requests, total_limit, profiling_limit):
+        if (not requests or len({row[0] for row in requests}) != len(requests)
+                or not math.isfinite(total_limit) or total_limit <= 0
+                or not math.isfinite(profiling_limit) or profiling_limit < 0
+                or any(category not in ('profiling', 'validation', 'benchmark') or not math.isfinite(hours)
+                       or hours <= 0 for _, _, category, hours in requests)):
+            raise ValueError('GPU 预留需要唯一身份、有效类别、用量和预算')
         with self.connection:
             self.connection.execute('BEGIN IMMEDIATE')
-            previous = self.connection.execute(
-                'SELECT run_id, category, hours, active FROM gpu_execution_reservations WHERE id=?',
-                (identity,)).fetchone()
-            if previous is not None and previous[:2] != (run_id, category):
-                raise ValueError('GPU 预留身份与运行编号不同')
-            if previous is not None and previous[3]:
+            fresh = []
+            for identity, run_id, category, hours in requests:
+                previous = self.connection.execute(
+                    'SELECT run_id, category, hours, active FROM gpu_execution_reservations WHERE id=?',
+                    (identity,)).fetchone()
+                if previous is not None and previous[:2] != (run_id, category):
+                    raise ValueError('GPU 预留身份与运行编号不同')
+                if previous is not None and previous[3]:
+                    if hours > previous[2] + 1e-9:
+                        raise ValueError('执行请求超出既有 GPU 预留')
+                else:
+                    fresh.append((identity, run_id, category, hours))
+            if not fresh:
                 return True
             pending = dict(self.connection.execute(
                 'SELECT category, SUM(hours) FROM gpu_execution_reservations WHERE active=1 GROUP BY category'))
             usage = self.usage()
-            if usage.get('gpu_hours', 0) + sum(pending.values()) + hours > total_limit + 1e-9:
+            if usage.get('gpu_hours', 0) + sum(pending.values()) + sum(row[3] for row in fresh) > total_limit + 1e-9:
                 return False
-            if category != 'benchmark' and (usage.get('profiling_gpu_hours', 0)
-                    + pending.get('validation', 0) + pending.get('profiling', 0) + hours > profiling_limit + 1e-9):
+            profiling = sum(hours for _, _, category, hours in fresh if category != 'benchmark')
+            if profiling and (usage.get('profiling_gpu_hours', 0)
+                    + pending.get('validation', 0) + pending.get('profiling', 0) + profiling > profiling_limit + 1e-9):
                 return False
-            self.connection.execute('INSERT INTO gpu_execution_reservations VALUES (?, ?, ?, ?, 1) '
-                'ON CONFLICT(id) DO UPDATE SET hours=excluded.hours, active=1', (identity, run_id, category, hours))
+            self.connection.executemany('INSERT INTO gpu_execution_reservations VALUES (?, ?, ?, ?, 1) '
+                'ON CONFLICT(id) DO UPDATE SET hours=excluded.hours, active=1', fresh)
         return True
 
     def release_gpu_execution(self, identity):
@@ -401,7 +414,8 @@ class ExperimentStore:
 
     def best_measured(self):
         eligible = [row for row in self.trials() if row['measurement'] and row['measurement']['status'] == 'PASS'
-            and row['measurement'].get('performance_eligible', False)]
+            and row['measurement'].get('performance_eligible', False)
+            and (row.get('measurement_reuse') or {}).get('status') != 'HISTORICAL_AS_RUN_ALIAS']
         return max(eligible, key=lambda row: row['measurement']['tokens_per_second'], default=None)
 
     def export(self, path):

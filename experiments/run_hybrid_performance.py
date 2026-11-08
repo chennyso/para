@@ -271,6 +271,7 @@ def execute(request, output, nodes, resume_existing=False, extra_sources=None, m
         code.mkdir(exist_ok=True)
         runtime_sources = {'native_hybrid_train.py': ROOT / 'experiments/native_hybrid_train.py',
             'hybrid_training_entry.py': ROOT / 'hybrid_training_entry.py',
+            'ddp_overlap.py': ROOT / 'paramorph/ddp_overlap.py',
             'checkpoint_io_guard.py': ROOT / 'checkpoint_io_guard.py',
             'frontier_hybrid_provider.py': ROOT / 'frontier_hybrid_provider.py',
             'frontier_falcon_cut.py': ROOT / 'frontier_falcon_cut.py',

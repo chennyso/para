@@ -4,6 +4,7 @@ from ortools.sat.python import cp_model
 
 from contracts import RewriteIntent, fingerprint
 from cost.runtime_calibration import configuration
+from ddp_overlap import resolve_ddp_overlap
 from core_data_models import Candidate
 from region_partition.region_partitioner import RegionPartitioner
 from validation.parallel_validator import validate_candidate
@@ -32,6 +33,7 @@ class CompleteAndRewrite:
             evidence_id=evidence_id, tasks=graph['tasks'])
 
     def candidate(self, request, parent_id=None):
+        resolve_ddp_overlap(request)
         attention = request.get('attention_backend_capabilities', self.registry.attention_capabilities)
         validate_attention_capability(dict(request, attention_backend_capabilities=attention),
             self.registry.model_config, self.topology)

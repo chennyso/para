@@ -1,4 +1,5 @@
 from collections import OrderedDict, defaultdict
+from ddp_overlap import DDP_OVERLAP_FIELDS, resolve_ddp_overlap
 from bisect import bisect_left
 import hashlib
 import json
@@ -69,6 +70,7 @@ def bucket_layout_signature(request):
 
 def load_bucket_evidence(projector, request):
     signature = bucket_layout_signature(request)
+    requested_overlap = resolve_ddp_overlap(request)
     actual_uuids = {str(device.get('uuid', device.get('gpu_uuid'))).removeprefix('GPU-').lower()
                     for device in projector.topology.devices}
     candidates = []
@@ -82,7 +84,7 @@ def load_bucket_evidence(projector, request):
         source = projector.compute_surface.database.connection.execute(
             'SELECT directory FROM profile_sources WHERE profile_id=?',
             (identifier,)).fetchone()
-        if source is not None:
+        if source is not None and Path(source[0]).is_dir():
             profile['source_directory'] = source[0]
         if not profile.get('source_directory'):
             continue
@@ -118,11 +120,15 @@ def load_bucket_evidence(projector, request):
             if not expected or not path.is_file():
                 break
             row = read_projection_bucket_document(path, expected)
-            if (row['schema_version'] != 1 or row['rank'] != rank
-                    or bucket_layout_signature(row['request']) != signature):
+            if row['schema_version'] != 1 or row['rank'] != rank:
                 raise ValueError('DDP Bucket的训练计划或Rank身份不一致')
             active_groups = {group['group_id'] for group in row['groups']
                              if len(group['physical_ranks']) > 1}
+            if any(group[name] is not requested_overlap[name] for group in row['groups']
+                    if group['group_id'] in active_groups for name in DDP_OVERLAP_FIELDS):
+                break
+            if bucket_layout_signature(dict(row['request'], **requested_overlap)) != signature:
+                raise ValueError('DDP Bucket的训练计划或Rank身份不一致')
             row['events'] = [event for event in row['events'] if event['group_id'] in active_groups]
             documents.append(row)
         if len(documents) == projector.topology.num_gpus:

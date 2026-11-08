@@ -12,7 +12,7 @@ from cost.cost_model import ExecutionCostModel, MissingCalibration
 from cost.runtime_calibration import configuration
 from scheduling.schedule_simulator import ScheduleCostEvaluator
 from scheduling.native_schedule_lowerer import native_stage_sequence
-from .profile_database import ProfileDatabase, normalized_execution, signature, plan_signature
+from .profile_database import ProfileDatabase, normalized_execution, signature, plan_signature, observed_ddp_overlap
 from .graph_delta import graph_delta, profile_key
 from .compute_cost import KernelCostSurface
 from .communication_cost import TopologyAwareNCCLCostSurface
@@ -357,6 +357,8 @@ class FastPredictor:
         result = json.loads((profile_directory / 'result.json').read_text())
         if result['status'] != 'PASS':
             raise ValueError('成本采集必须完成真实训练验证')
+        world = request['node_count'] * request['gpus_per_node']
+        runtime_overlap = observed_ddp_overlap(profile_directory / 'artifacts', world)
         anchor = None
         if anchor_directory is not None:
             anchor_directory = Path(anchor_directory)
@@ -364,7 +366,9 @@ class FastPredictor:
             anchor = json.loads((anchor_directory / 'result.json').read_text())
             if anchor['status'] != 'PASS' or not anchor['performance_eligible']:
                 raise ValueError('Anchor必须完成正式真实训练测量')
-            if signature(request) != signature(anchor_request) or request['decoder_chunks'] != anchor_request['decoder_chunks']:
+            anchor_overlap = observed_ddp_overlap(anchor_directory / 'artifacts', world)
+            if (signature(dict(request, **runtime_overlap)) != signature(dict(anchor_request, **anchor_overlap))
+                    or request['decoder_chunks'] != anchor_request['decoder_chunks']):
                 raise ValueError('成本采集与Anchor执行条件不兼容')
             for name in ('native_hybrid_train.py', 'hybrid_training_entry.py', 'frontier_hybrid_provider.py'):
                 if result['source_hashes'][name] != anchor['source_hashes'][name]:
@@ -444,6 +448,7 @@ class FastPredictor:
                 workspace_bytes=max(event['workspace_upper_bound_bytes'] for event in events),
                 layer_count=len(ids))
         document = dict(id=request['run_id'] + (':anchored' if anchor is not None else ':raw'), request=request, anchor=anchor,
+            runtime_ddp_overlap=runtime_overlap,
             source_hashes=result['source_hashes'], sequences=sequences, layers=layer_rows,
             regions=region_rows, memory=memory,
             links={f'{source}:{destination}:{direction}': median(values)

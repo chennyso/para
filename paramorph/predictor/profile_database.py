@@ -6,6 +6,7 @@ import statistics
 from dataclasses import asdict
 from pathlib import Path
 from core_data_models import MemoryPolicy
+from ddp_overlap import DDP_OVERLAP_FIELDS, resolve_ddp_overlap
 
 from .measured_modules import annotate_measurement_semantics
 
@@ -28,7 +29,8 @@ EXECUTION_FIELDS += ('execution_backend', 'fsdp_sharding_strategy', 'dense_shard
     'fsdp_bucket_elements', 'checkpoint_format', 'checkpoint_reshard', 'optimizer_checkpoint_mode')
 EXECUTION_FIELDS += ('pipeline_dtype', 'sequence_parallel', 'clip_grad')
 EXECUTION_FIELDS += ('main_grads_dtype', 'main_params_dtype', 'exp_avg_dtype', 'exp_avg_sq_dtype')
-PROFILE_SIGNATURE_REVISION = 'native_backend_effective_execution_v5'
+EXECUTION_FIELDS += DDP_OVERLAP_FIELDS
+PROFILE_SIGNATURE_REVISION = 'native_backend_effective_execution_v6'
 
 
 def resolved_cuda_connections(request):
@@ -99,6 +101,7 @@ def normalized_execution(request):
     resolved['sequence_parallel'] = request.get('sequence_parallel', request['tp'] > 1)
     backend = request.get('execution_backend', 'megatron_ddp')
     resolved['execution_backend'] = backend
+    resolved.update(resolve_ddp_overlap(request))
     for name in ('main_grads_dtype', 'main_params_dtype', 'exp_avg_dtype', 'exp_avg_sq_dtype'):
         value = request.get(name, 'float32' if backend == 'megatron_ddp' else None)
         resolved[name] = value.removeprefix('torch.') if isinstance(value, str) else value
@@ -158,6 +161,36 @@ def same_training_plan(first, second):
     return left == right and first['decoder_chunks'] == second['decoder_chunks']
 
 
+def observed_ddp_overlap(directory, world):
+    paths = [Path(directory) / f'rank{rank}.manifest.json' for rank in range(world)]
+    if not all(path.is_file() for path in paths):
+        return {}
+    manifests = [json.loads(path.read_text()) for path in paths]
+    values = {}
+    for name in DDP_OVERLAP_FIELDS:
+        observed = [row.get(name) for row in manifests]
+        if all(value is None for value in observed):
+            continue
+        if any(type(value) is not bool or value is not observed[0] for value in observed):
+            raise ValueError(f'逐 Rank DDP 配置证据不一致：{name}')
+        values[name] = observed[0]
+    return values
+
+
+def profile_execution_request(document, source=None):
+    request = document['request']
+    bound = document.get('runtime_ddp_overlap')
+    if bound is None:
+        for directory in dict.fromkeys((source, document.get('source_directory'))):
+            if not directory:
+                continue
+            bound = observed_ddp_overlap(Path(directory) / 'artifacts',
+                request['node_count'] * request['gpus_per_node'])
+            if bound:
+                break
+    return dict(request, **(bound or {}))
+
+
 def backend_reuse_evidence(request, profile):
     target = request.get('backend_fingerprint')
     hashes = profile.get('source_hashes')
@@ -214,9 +247,10 @@ class ProfileDatabase:
         signature_revision = self.connection.execute(
             'SELECT value FROM database_metadata WHERE key=?', ('profile_signature_revision',)).fetchone()
         if signature_revision is None or signature_revision[0] != PROFILE_SIGNATURE_REVISION:
-            for identifier, encoded in self.connection.execute('SELECT id, document FROM profiles'):
+            for identifier, encoded, source in self.connection.execute('SELECT profiles.id, document, directory '
+                    'FROM profiles LEFT JOIN profile_sources ON profiles.id=profile_sources.profile_id'):
                 self.connection.execute('UPDATE profiles SET signature=? WHERE id=?',
-                    (signature(json.loads(encoded)['request']), identifier))
+                    (signature(profile_execution_request(json.loads(encoded), source)), identifier))
             self.connection.execute('INSERT OR REPLACE INTO database_metadata VALUES (?, ?)',
                 ('profile_signature_revision', PROFILE_SIGNATURE_REVISION))
         self.connection.commit()
@@ -228,10 +262,13 @@ class ProfileDatabase:
             (document['id'],)).fetchone()
         if existing is not None:
             previous = annotate_measurement_semantics(json.loads(existing[0]))
-            if json.loads(json.dumps(previous, allow_nan=False)) != json.loads(encoded):
+            comparable = json.loads(encoded)
+            if 'runtime_ddp_overlap' not in previous:
+                comparable.pop('runtime_ddp_overlap', None)
+            if json.loads(json.dumps(previous, allow_nan=False)) != comparable:
                 raise ValueError('同一测量身份对应不同证据')
         self.connection.execute('INSERT OR IGNORE INTO profiles VALUES (?, ?, ?)',
-            (document['id'], signature(document['request']), encoded))
+            (document['id'], signature(profile_execution_request(document)), encoded))
         self.connection.commit()
 
     def add_communication(self, identifier, benchmark):
@@ -261,8 +298,12 @@ class ProfileDatabase:
             self.connection.execute('PRAGMA data_version').fetchone()[0])
         cached = getattr(self, '_measured_profile_cache', None)
         if cached is None or cached[0] != generation:
-            records = [(identifier, json.loads(encoded)) for identifier, encoded in
-                self.connection.execute('SELECT id, document FROM profiles ORDER BY id')]
+            records = []
+            for identifier, encoded, directory in self.connection.execute('SELECT profiles.id, document, directory '
+                    'FROM profiles LEFT JOIN profile_sources ON profiles.id=profile_sources.profile_id ORDER BY profiles.id'):
+                profile = json.loads(encoded)
+                profile['request'] = self.profile_request(profile, directory)
+                records.append((identifier, profile))
             self._measured_profile_cache = (generation, records)
         return [(identifier, dict(profile)) for identifier, profile in self._measured_profile_cache[1]]
 
@@ -376,11 +417,19 @@ class ProfileDatabase:
         document = json.loads(row[1])
         source = self.connection.execute('SELECT directory FROM profile_sources WHERE profile_id=?',
             (profile_id,)).fetchone()
-        if source:
+        if source and Path(source[0]).is_dir():
             document['source_directory'] = source[0]
+        document['request'] = self.profile_request(document)
         if blind and same_training_plan(document['request'], request):
             raise ValueError('盲测候选不能使用自身的成本、Anchor或显存校准记录')
         return document
+
+    def profile_request(self, document, source=None):
+        cache = self.__dict__.setdefault('_profile_runtime_request_cache', {})
+        key = (document['id'], str(source or document.get('source_directory') or ''))
+        if key not in cache:
+            cache[key] = profile_execution_request(document, source)
+        return dict(cache[key])
 
     def register_source(self, profile_id, directory):
         row = self.connection.execute('SELECT document FROM profiles WHERE id=?', (profile_id,)).fetchone()
@@ -398,6 +447,8 @@ class ProfileDatabase:
         if existing and existing[0] != str(directory):
             raise ValueError('成本证据的实际Trace来源目录发生变化')
         self.connection.execute('INSERT OR IGNORE INTO profile_sources VALUES (?, ?)', (profile_id, str(directory)))
+        self.connection.execute('UPDATE profiles SET signature=? WHERE id=?',
+            (signature(self.profile_request(document, directory)), profile_id))
         self.connection.commit()
 
     def matches(self, profile_id, request):
@@ -414,7 +465,7 @@ class ProfileDatabase:
         documents = [(identifier, json.loads(document)) for identifier, document in rows]
         if blind:
             documents = [(identifier, document) for identifier, document in documents
-                if not same_training_plan(document['request'], request)]
+                if not same_training_plan(self.profile_request(document), request)]
         if not documents:
             return None
         return max(documents, key=lambda item: (
@@ -426,13 +477,14 @@ class ProfileDatabase:
         identity_fields = ('model', 'checkpoint', 'precision', 'attention_backend',
             'cross_entropy_impl', 'optimizer_sharding', 'execution_backend',
             'dense_sharding_strategy', 'expert_sharding_strategy', 'sequence_parallel',
-            'pipeline_dtype', 'clip_grad')
+            'pipeline_dtype', 'clip_grad', *DDP_OVERLAP_FIELDS)
         output = []
         target = normalized_execution(request)
         for identifier, encoded in self.connection.execute('SELECT id, document FROM profiles ORDER BY id'):
             document = json.loads(encoded)
-            previous = normalized_execution(document['request'])
-            if blind and same_training_plan(document['request'], request):
+            measured_request = self.profile_request(document)
+            previous = normalized_execution(measured_request)
+            if blind and same_training_plan(measured_request, request):
                 continue
             if any(previous.get(key) != target.get(key) for key in identity_fields):
                 continue

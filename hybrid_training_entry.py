@@ -8,6 +8,7 @@ import sys
 import os
 import time
 from pathlib import Path
+from ddp_overlap import resolve_ddp_overlap, verify_ddp_overlap
 
 faulthandler.enable(all_threads=True)
 sys.path.append('/workspace/paper-repros-20261003')
@@ -150,6 +151,7 @@ def profile_step_end(self, context):
 
 def record_ownership(self, context):
     faulthandler.cancel_dump_traceback_later()
+    verify_ddp_overlap(context.state.cfg.ddp, resolve_ddp_overlap(REQUEST), rank=native.dist.get_rank())
     original_evidence_start(self, context)
     manifest_path = self.args.output / f'rank{self.rank}.manifest.json'
     manifest = json.loads(manifest_path.read_text())
@@ -716,15 +718,11 @@ def pretrain(config, forward_step_func, callbacks):
         REQUEST.get('optimizer_transfer_overlap', False))
     if cfg.optimizer.overlap_cpu_optimizer_d2h_h2d and optimizer_offload_fraction == 0:
         raise ValueError('Optimizer传输重叠要求启用CPU Optimizer Offload')
-    cfg.ddp.overlap_grad_reduce = not use_fsdp
-    cfg.ddp.overlap_param_gather = cfg.optimizer.use_distributed_optimizer and not use_fsdp
-    if 'overlap_grad_reduce' in REQUEST:
-        cfg.ddp.overlap_grad_reduce = REQUEST['overlap_grad_reduce']
-    if 'overlap_param_gather' in REQUEST:
-        cfg.ddp.overlap_param_gather = REQUEST['overlap_param_gather']
-    if isinstance(cfg.model, native.FalconH1ModelProvider) and '--recompute' in sys.argv:
-        cfg.ddp.overlap_grad_reduce = False
-        cfg.ddp.overlap_param_gather = False
+    ddp_overlap = resolve_ddp_overlap(REQUEST)
+    for name, enabled in ddp_overlap.items():
+        setattr(cfg.ddp, name, enabled)
+    cfg.optimizer.overlap_param_gather = ddp_overlap['overlap_param_gather']
+    verify_ddp_overlap(cfg.ddp, ddp_overlap)
     print('FRONTIER_HYBRID_PROGRAM ' + json.dumps({'decoder_chunks': counts, 'hybrid_layer_pattern': pattern,
         'tp': cfg.model.tensor_model_parallel_size, 'cp': cfg.model.context_parallel_size,
         'pp': pp, 'vpp': vpp, 'data_workers': cfg.dataset.num_workers,

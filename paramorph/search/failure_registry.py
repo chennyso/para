@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import re
 
 from contracts import TrainingPlan, fingerprint
@@ -11,6 +12,7 @@ def classify_failure(result, plan, phase):
     raw = result.get('raw_artifacts')
     paths = sorted(Path(raw).glob('node*.log')) if raw else []
     patterns = (
+        ('EXECUTION_CONFIG_MISMATCH', 'runtime_configuration', r'EXECUTION_CONFIG_MISMATCH:'),
         ('NUMERICAL_CORRECTNESS', 'optimizer_update', r'FSDP优化器没有取得任何真实梯度|non.finite (?:loss|grad)|nonfinite|NaN.*(?:loss|grad)'),
         ('ENVIRONMENT', 'distributed_initialization', r'EADDRINUSE|DistNetworkError|NCCL.*(?:unhandled system error|remote process exited)|watchdog.*timed out'),
         ('CHECKPOINT_FAILURE', 'checkpoint_load', r'CheckpointException|checkpoint.*(?:not found|missing key|shape mismatch)'),
@@ -26,6 +28,8 @@ def classify_failure(result, plan, phase):
                     break
     if status in ('CUDA_OOM', 'HOST_MEMORY_BUDGET_EXCEEDED'):
         kind, stage = 'CAPACITY', phase
+    elif result.get('runtime_validation_kind') == 'EXECUTION_CONFIG_MISMATCH':
+        kind, stage = 'EXECUTION_CONFIG_MISMATCH', 'runtime_configuration'
     elif result.get('execution_deadline_reached'):
         kind, stage = 'ENVIRONMENT', 'execution_deadline'
     elif observed:
@@ -44,4 +48,14 @@ def classify_failure(result, plan, phase):
         observed_error_lines=[evidence for category, _, evidence in observed if category == kind][:4],
         retry_eligibility=retry,
         gpu_allocation_seconds=result.get('gpu_allocation_seconds'))
+    if kind == 'EXECUTION_CONFIG_MISMATCH':
+        document['runtime_config_mismatch'] = result.get('runtime_config_mismatch', [])
+        if not document['runtime_config_mismatch']:
+            observed_configs = []
+            for path in paths:
+                for line in path.read_text(errors='replace').splitlines():
+                    match = re.search(r'ValueError: EXECUTION_CONFIG_MISMATCH: (\{.*\})$', line)
+                    if match:
+                        observed_configs.append(dict(file=path.name, **json.loads(match[1])))
+            document['runtime_config_mismatch'] = observed_configs
     return dict(document, witness_id=fingerprint(document))
