@@ -176,6 +176,12 @@ class MegatronAdapter:
             if compared != stored:
                 raise ValueError('恢复执行的真实训练配置发生变化')
             request = stored
+            result_path = directory / 'result.json'
+            if result_path.is_file():
+                result = json.loads(result_path.read_text())
+                if result['run_id'] != stored['run_id']:
+                    raise ValueError('已收集的结果与原始运行编号不同')
+                return result, directory
         sources = {}
         if 'fp16_bounded_adam_sha256' in request:
             if bounded_adam_source is None:

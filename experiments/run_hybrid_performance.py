@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 from pathlib import Path
 
@@ -101,24 +102,57 @@ def shared_pvc_exec(*arguments, timeout_seconds=None):
 
 
 def download_artifact(remote, destination, expected_digest):
-    partial = destination.with_suffix('.partial')
+    size = int(shared_pvc_exec('stat', '-c', '%s', remote).strip())
+    if size <= 0:
+        raise ValueError(f'实验归档为空：{remote}')
     targets = tuple(reversed(PODS[:2]))
-    for attempt in range(3):
-        pod = targets[attempt % len(targets)]
-        with partial.open('wb') as target:
-            result = subprocess.run(['kubectl', '--context', 'prd', '--request-timeout=90s',
-                'exec', '-n', 'default', pod, '-c', 'trainer', '--', 'cat', str(remote)],
-                stdout=target, stderr=subprocess.PIPE, timeout=100, env=cluster_environment())
-        if result.returncode == 0:
-            with partial.open('rb') as target:
-                digest = hashlib.file_digest(target, 'sha256').hexdigest()
-            if digest == expected_digest:
-                partial.replace(destination)
-                return
-            if attempt == 2:
-                raise ValueError('实验归档SHA256检查失败')
-        elif attempt == 2:
-            result.check_returncode()
+    block = 4 * 1024 * 1024
+    environment = cluster_environment()
+    environment['KUBECTL_REMOTE_COMMAND_WEBSOCKETS'] = 'true'
+    digest = hashlib.sha256()
+
+    def receive(offset):
+        length = min(block, size - offset)
+        data = bytearray()
+        attempts = 0
+        while len(data) < length:
+            position = offset + len(data)
+            remaining = length - len(data)
+            pod = targets[(offset // block + attempts) % len(targets)]
+            try:
+                result = subprocess.run(['kubectl', '--context', 'prd', '--request-timeout=40s',
+                    'exec', '-n', 'default', pod, '-c', 'trainer', '--', 'dd', 'if=' + str(remote),
+                    'iflag=skip_bytes,count_bytes,fullblock', 'bs=1048576', 'skip=' + str(position),
+                    'count=' + str(remaining), 'status=none'], capture_output=True, timeout=50,
+                    env=environment)
+            except subprocess.TimeoutExpired:
+                attempts += 1
+                if attempts == 3:
+                    raise
+                continue
+            received = len(result.stdout)
+            if result.returncode == 0 and min(65536, remaining) <= received <= remaining:
+                data.extend(result.stdout)
+                attempts = 0
+                continue
+            attempts += 1
+            if attempts == 3:
+                result.check_returncode()
+                raise ValueError(f'实验归档分段长度不符：偏移 {position}，预期 {remaining} 字节，收到 {received} 字节')
+        return data
+
+    # 逐段核对长度，防止远端命令返回成功但传输提前结束。
+    with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=destination.name + '.',
+            suffix='.partial', delete_on_close=False) as target, \
+            concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        for start in range(0, size, 4 * block):
+            for payload in pool.map(receive, range(start, min(size, start + 4 * block), block)):
+                target.write(payload)
+                digest.update(payload)
+        if digest.hexdigest() != expected_digest:
+            raise ValueError(f'实验归档 SHA-256 校验失败：{remote}')
+        target.flush()
+        os.link(target.name, destination)
 
 
 def node_action(node, request, action, run):
@@ -252,6 +286,8 @@ def execute(request, output, nodes, resume_existing=False, extra_sources=None, m
         start_nodes = [node for node in nodes if not any(
             f'node{node["index"]}.{suffix}' in launch_records
             for suffix in ('pid', 'helper.pid', 'exit.json'))]
+        if completed_path.is_file() and start_nodes:
+            raise ValueError(f'已结束的实验缺少原始节点执行记录：{remote}')
     else:
         start_nodes = nodes
     if len(start_nodes) == len(nodes):
@@ -315,10 +351,15 @@ def execute(request, output, nodes, resume_existing=False, extra_sources=None, m
     artifacts = directory / 'artifacts'
     metadata = directory / 'metadata-export.tar.gz'
     if metadata_archive is None:
-        exported = json.loads(shared_pvc_exec('python', remote / 'code/hybrid_artifact_export.py',
-            '--run', remote, timeout_seconds=600))
-        download_artifact(exported['archive_path'], metadata, exported['sha256'])
-        expected_digest = exported['sha256']
+        remote_archive = remote / metadata.name
+        if resume_existing and remote_archive.name in launch_records:
+            expected_digest = shared_pvc_exec('sha256sum', remote_archive).split()[0]
+        else:
+            exported = json.loads(shared_pvc_exec('python', remote / 'code/hybrid_artifact_export.py',
+                '--run', remote, timeout_seconds=600))
+            remote_archive, expected_digest = Path(exported['archive_path']), exported['sha256']
+        if not metadata.is_file():
+            download_artifact(remote_archive, metadata, expected_digest)
     else:
         if not resume_existing or Path(metadata_archive).resolve() != metadata.resolve():
             raise ValueError('指定的归档需要属于当前已结束实验')
