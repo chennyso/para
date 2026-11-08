@@ -30,15 +30,18 @@ def classify_failure(result, plan, phase):
         kind, stage = 'ENVIRONMENT', 'execution_deadline'
     elif observed:
         kind, stage, _ = min(observed, key=lambda row: next(i for i, spec in enumerate(patterns) if spec[0] == row[0]))
-    elif status == 'PASS':
+    elif status in ('PASS', 'VALIDATION_FAILED'):
         kind, stage = 'INVALID_MEASUREMENT', 'performance_window'
     else:
         kind, stage = 'UNCLASSIFIED', phase
+    retry = {'ENVIRONMENT': 'requires_changed_environment',
+        'INVALID_MEASUREMENT': 'requires_changed_measurement',
+        'UNCLASSIFIED': 'requires_investigation'}.get(kind, 'requires_changed_execution')
     document = dict(kind='terminal_execution_failure', status=status, failure_type=kind,
         failure_stage=stage, effective_plan_hash=TrainingPlan.model_validate(plan).effective_plan_hash,
         backend_source_hashes=result.get('source_hashes'), checkpoint_identity=result.get('checkpoint'),
         returncodes=result.get('returncodes'), evidence_refs=[result['run_id']],
         observed_error_lines=[evidence for category, _, evidence in observed if category == kind][:4],
-        retry_eligibility='requires_changed_environment' if kind == 'ENVIRONMENT' else 'requires_changed_execution',
+        retry_eligibility=retry,
         gpu_allocation_seconds=result.get('gpu_allocation_seconds'))
     return dict(document, witness_id=fingerprint(document))

@@ -7,6 +7,7 @@ import statistics
 
 from core_data_models import ParallelConfig, MemoryPolicy, Task, TaskType, ExecutionPlan
 from cost.cost_model import MissingCalibration
+from scheduling.native_schedule_lowerer import verify_native_execution_events
 
 
 def configuration(request):
@@ -83,6 +84,10 @@ class RuntimeCalibration:
             raise ValueError('成本文件来自不同并行配置')
         if any(not item['forward_backward_coverage_verified'] for item in self.payloads):
             raise ValueError('实际执行未覆盖完整Forward和Backward')
+        request = self.payloads[0]['request']
+        self.native_execution_events = (verify_native_execution_events(request, self.payloads)
+            if request.get('record_native_schedule') and not request.get('paramorph_execution_plan')
+            and not request.get('paramorph_schedule_table') else None)
         self.steps = {}
         self.tasks = {}
 
@@ -193,7 +198,7 @@ class RuntimeCalibration:
             held_out_steps=held_out_steps,
             granularity='complete_iteration_measured_phase',
             data_gaps=['独立PP链路通信成本', '真实计算通信并发配对成本', '跨rank完整关键路径'],
-            rank_steps=self.steps)
+            rank_steps=self.steps, native_execution_events=self.native_execution_events)
 
     def execution_plan(self, costs, held_out_steps=1):
         if not self.tasks:

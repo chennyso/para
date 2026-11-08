@@ -255,6 +255,14 @@ class ProfilingRequest(Contract):
     result: dict | None = None
 
 
+class TrainingRetry(Contract):
+    failed_run_id: str = Field(min_length=1)
+    resolved_condition: Literal['requires_changed_environment', 'requires_changed_measurement',
+        'requires_investigation']
+    evidence_reference: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+
+
 class SystemConfig(Contract):
     request: dict
     model_config_path: str
@@ -301,6 +309,7 @@ class SystemConfig(Contract):
         'without_search_memory', 'single_agent'] = 'full'
     execution_evidence_format: Literal['legacy', 'execution_view', 'flat_records'] = 'legacy'
     run_namespace: str = ''
+    training_retries: dict[str, TrainingRetry] = Field(default_factory=dict)
     selection_policy: Literal['investigation', 'topk', 'diversity'] = 'investigation'
     intent_count: int = Field(default=6, ge=1, le=32)
     use_backend_global_domains: bool = True

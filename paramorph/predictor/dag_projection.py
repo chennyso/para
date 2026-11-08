@@ -21,13 +21,14 @@ from predictor.physical_paths import communication_resources
 from predictor.state_sharding import parameter_state_ownership, phased_memory_bounds, state_sharding_config
 from region_partition.region_partitioner import RegionPartitioner
 from scheduling.native_schedule_lowerer import lower_native_schedule
+from scheduling.native_microbatches import native_schedule_settings
 from scheduling.schedule_simulator import ScheduleCostEvaluator, topological_order, union_length
 from scheduling.task_graph_builder import TaskGraphBuilder
 
 
 DTYPE_BYTES = {'bfloat16': 2, 'float16': 2, 'float32': 4}
 
-PROJECTION_REVISION = 'native_event_graph_v43_overlap_admission'
+PROJECTION_REVISION = 'native_event_graph_v44_phased_p2p_and_overlap_conditions'
 
 OPTIMIZER_PROFILE_FIELDS = (
     'model', 'checkpoint', 'optimizer', 'optimizer_config', 'optimizer_sharding',
@@ -155,7 +156,8 @@ class DAGProjector:
                 calibration_run_ids=self.calibration_run_ids)
         result = deepcopy(self.cost_cache[identity_key])
         result.update(projection_operation=operation, logical_layer=layer_id,
-                      physical_rank=physical_rank, cost_key=identity_key)
+                      physical_rank=physical_rank, cost_key=identity_key,
+                      single_gemm=components is None and analytical_operation == 'gemm')
         costs.append(result)
         return result['milliseconds']
 
@@ -642,7 +644,7 @@ class DAGProjector:
                 region_id=row.get('region_id', row.get('region')),
                 dependencies=list(row.get('dependencies', [])), metadata=deepcopy(row.get('metadata', {})))
         topological_order(tasks)
-        lower_native_schedule(tasks, config, request.get('overlap_p2p', False),
+        lower_native_schedule(tasks, config, native_schedule_settings(request),
             lambda parent, child: tasks[child].dependencies.append(parent))
         return source, tasks, None
 
@@ -1109,8 +1111,7 @@ class DAGProjector:
             most_dangerous_rank=max(peaks, key=peaks.get),
             most_dangerous_phase=breakdown[max(peaks, key=peaks.get)]['most_dangerous_phase'])
 
-    def project(self, request, candidate_graph=None, parent_request=None, cost_mode='hybrid', *, blind=False):
-        started = time.perf_counter()
+    def prepare_cost_surfaces(self, request, cost_mode='hybrid', *, blind=False):
         if cost_mode not in ('hybrid', 'measured_only', 'analytical_only'):
             raise ValueError('预测成本模式需要hybrid、measured_only或者analytical_only')
         self.mode, self.cost_cache, self.memory_missing, self.blind = cost_mode, {}, set(), blind
@@ -1141,6 +1142,11 @@ class DAGProjector:
             self.reusable_profile.get('pipeline_dtype', self.dtype) if self.reusable_profile else self.dtype)
         if config.world_size != self.topology.num_gpus:
             raise ValueError('预测计划与实际硬件GPU数量不同')
+        return config
+
+    def project(self, request, candidate_graph=None, parent_request=None, cost_mode='hybrid', *, blind=False):
+        started = time.perf_counter()
+        config = self.prepare_cost_surfaces(request, cost_mode, blind=blind)
         regions = RegionPartitioner(self.model, config).from_counts(request['decoder_chunks'])
         costs, tasks = [], {}
         source, tasks, unsupported = self._native_tasks(candidate_graph, request, config, regions)
@@ -1286,10 +1292,12 @@ class DAGProjector:
                 task.duration, resources = self._communication('p2p', size, task.metadata['group_ranks'], costs,
                     dtype=self.pipeline_dtype)
                 task.metadata['pipeline_dtype'] = self.pipeline_dtype
+                task.metadata['payload_bytes'] = size
+                task.metadata['physical_group_ranks'] = [self.groups['rank_mapping'][rank] for rank in task.metadata['group_ranks']]
                 task.resource_requirements = tuple(resources) or tuple(
                     f'gpu:{self.groups["rank_mapping"][rank]}:communication'
                     for rank in task.metadata['group_ranks'])
-                if not request.get('overlap_p2p', False):
+                if task.metadata['native_launch_policy'] == 'blocking':
                     task.resource_requirements += (f'gpu:{physical}:compute',)
                 task.metadata['communication_buffer_bytes'] = size
                 task.metadata['participant_ranks'] = task.metadata['group_ranks']
@@ -1360,6 +1368,17 @@ class DAGProjector:
                                     f'当前DAG投影不支持独立任务：{task.task_type.value}')
             task.metadata['cost_components'] = [*reused_components,
                 *self._cost_components(costs[task_cost_start:])]
+            kernel_rows = [row for row in costs[task_cost_start:] if row.get('milliseconds')]
+            if (task.task_type in (TaskType.FORWARD_COMPUTE, TaskType.BACKWARD_COMPUTE)
+                    and not reused_components and len(kernel_rows) == 1 and kernel_rows[0]['single_gemm']):
+                identity = kernel_rows[0].get('identity') or {}
+                shape = identity.get('features') or {}
+                if set(shape) == {'M', 'N', 'K'} and all(type(value) is int and value > 0 for value in shape.values()):
+                    task.metadata['overlap_kernel'] = dict(compute_kind=task.task_type.value,
+                        compute_shape=shape, compute_dtype=identity.get('dtype', self.dtype), kernel_measurement='single_gemm',
+                        compute_operation=identity.get('operation'), compute_implementation=identity.get('implementation'),
+                        backend_environment=fingerprint(dict(backend=request.get('backend_fingerprint'),
+                            software=self.topology.software, hardware=request.get('hardware_fingerprint'))))
             if task.duration is not None and not math.isclose(task.duration, sum(
                     row['milliseconds'] * row['occurrences']
                     for row in task.metadata['cost_components']), rel_tol=1e-9, abs_tol=1e-7):
@@ -1618,13 +1637,14 @@ class DAGProjector:
                 identity = compact_identity
                 request['reason'] = request.get('reason') or row.get('reason')
             if kind == 'compute_communication_overlap':
-                feature = {name: identity.get(name) for name in (
-                    'compute_kind', 'collective', 'physical_group_ranks', 'payload_bytes')}
+                feature = identity.get('condition')
+                if feature is None:
+                    continue
                 group_key = fingerprint(dict(kind=kind, feature=feature))
                 compute_task = identity.get('compute_task_id')
                 communication_task = identity.get('communication_task_id')
                 if group_key not in grouped:
-                    grouped[group_key] = dict(kind=kind, **feature,
+                    grouped[group_key] = dict(kind=kind, **feature, condition=feature,
                         cost_key=group_key, reason=request.get('reason', row.get('reason')),
                         occurrence_count=0, critical_occurrence_count=0,
                         profile_required_occurrence_count=0, cost_statuses=[],

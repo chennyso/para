@@ -893,8 +893,9 @@ class StrategyTransformationCompiler:
             raise ValueError(errors)
         dag = TaskGraphBuilder().build(self.model, candidate.parallel_config,
             candidate.region_layout, candidate.parallel_config.num_microbatches)
+        execution = candidate.parallel_config.execution_implementation
         lower_native_schedule(dag.tasks, candidate.parallel_config,
-            bool(candidate.parallel_config.execution_implementation.get('overlap_p2p')), dag.add_dependency)
+            {'overlap_p2p': bool(execution.get('overlap_p2p')), **execution}, dag.add_dependency)
         if dag.has_cycle():
             raise ValueError('训练任务图存在循环依赖')
         return dag

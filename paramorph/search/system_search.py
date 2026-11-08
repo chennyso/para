@@ -25,7 +25,7 @@ from graph.complete_rewrite import CompleteAndRewrite
 from graph.model_graph import read_model, build_operator_graph
 from predictor import FastPredictor
 from predictor.dag_projection import PROJECTION_REVISION
-from predictor.stage_model import STAGE_MODEL_REVISION, aggregate_stage_cost
+from predictor.stage_model import STAGE_MODEL_REVISION, aggregate_stage_cost, project_stage_cost
 from predictor.fast_predictor import ranges
 from cost.runtime_calibration import configuration
 from storage.experiment_store import ExperimentStore, prediction_evidence
@@ -610,11 +610,18 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
         if self.config.agent_ablation == 'without_dag_model':
             started = time.perf_counter()
             estimate = aggregate_stage_cost(request, self.profile)
+            costs = []
+            if estimate is None:
+                estimate, costs = project_stage_cost(request, self.predictor.projector,
+                    cost_mode=self.config.predictor_cost_mode)
             report = self.predictor.needs_profile(request, started,
                 ['缺少当前阶段模型的匹配计算、通信或优化器成本'] if estimate is None else [],
                 persist=False)
             report['evidence'].update(predictor_revision=STAGE_MODEL_REVISION, estimator='aggregate_stage_model',
                 stage_profile=None if estimate is None else estimate['profile_id'])
+            if costs:
+                report['evidence']['costs'] = costs
+                report['evidence']['profiling_requests'].extend(self.predictor.projector._profiling_requests(costs))
             if estimate is not None:
                 report['prediction_status'] = 'PREDICTED_ANALYTICAL'
                 report['validation']['status'] = 'PROJECTABLE'
@@ -5154,18 +5161,20 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
                             for index in range(request['pp'])],
                         paramorph_memory_audit=True, paramorph_serial_calibration_steps=0)
                 else:
-                    ranks = identity.get('physical_group_ranks')
-                    payload = identity.get('payload_bytes')
-                    if not ranks or payload is None:
+                    condition = identity.get('condition')
+                    if not condition:
                         continue
+                    ranks, payload = condition['physical_group_ranks'], condition['payload_bytes']
+                    if condition['collective'] not in ('p2p', 'all_gather', 'reduce_scatter', 'all_reduce'):
+                        continue
+                    # 成本测量运行使用共同环境模板；候选配置通过 trial_ids 关联。
+                    request = dict(self.config.request)
                     request.update(compute_communication_profile=True,
                         overlap_group_ranks=ranks,
-                        overlap_collective=identity['collective'],
+                        overlap_collective=condition['collective'],
                         overlap_payload_bytes=payload,
-                        overlap_compute_shape=dict(
-                            M=request['micro_batch'] * request['sequence'] // request['cp'],
-                            N=self.model.ffn_hidden_size // request['tp'],
-                            K=self.model.hidden_size))
+                        overlap_compute_shape=condition['compute_shape'],
+                        overlap_condition=condition)
                 key = item.get('cost_key', fingerprint(identity or request))
                 if kind == 'representative_module':
                     condition = dict(model=request['model'],
@@ -5180,7 +5189,7 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
                         expert_dp_inner_size=request.get('expert_dp_inner_size'))
                     condition_key = fingerprint(condition)
                 else:
-                    condition_key = (key if kind == 'nccl' else fingerprint(dict(
+                    condition_key = (key if kind in ('nccl', 'compute_communication_overlap') else fingerprint(dict(
                         cost_key=key, plan_signature=plan_signature(request))))
                 condition_key = fingerprint(dict(cost_condition=condition_key,
                     execution_request={name: value for name, value in request.items()
@@ -5273,8 +5282,6 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
         if not stored.is_file() and insufficient:
             return self.store.update_profile_request(identifier, state='OUT_OF_BUDGET',
                 reason='剩余成本测量时间或者GPU预算不足')
-        self.store.update_profile_request(identifier, state='APPROVED')
-        self.store.update_profile_request(identifier, state='RUNNING')
         if stored.is_file():
             previous = json.loads(stored.read_text())
             execution['max_allocation_seconds'] = previous.get('max_allocation_seconds')
@@ -5289,11 +5296,10 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
             execution['nccl_profile'] = True
         result, directory = self.execute_receipted(execution, identity=identifier, category='profiling',
             profile=not is_nccl)
+        if result is None:
+            return self.store.update_profile_request(identifier, state='OUT_OF_BUDGET',
+                reason='GPU 预算预留未通过')
         result = json.loads((directory / 'result.json').read_text())
-        seconds = result['gpu_allocation_seconds']
-        hours = self.topology.num_gpus * seconds / 3600
-        self.store.charge(identifier + ':gpu', 'gpu_hours', hours)
-        self.store.charge(identifier + ':profile', 'profiling_gpu_hours', hours)
         self.store.add_evidence(identifier, 'MEASURED' if result['status'] == 'PASS' else 'FAILURE', result)
         if result['status'] != 'PASS':
             source_trial = next(row for row in self.store.trials() if row['trial_id'] in request['trial_ids'])
@@ -5397,13 +5403,14 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
         world = self.topology.num_gpus
         validation_seconds = self.config.fsdp_load_validation_seconds
         estimate = min(120.0, budget.estimated_trial_seconds) * world / 3600
-        validation_id = trial['plan']['backend_config']['run_id'] + '-load-validation'
+        retry = trial.get('training_retry') or {}
+        validation_id = retry.get('run_id', trial['plan']['backend_config']['run_id']) + '-load-validation'
         stored = self.execution_directory(validation_id, profile=False) / 'request.json'
         if not stored.is_file() and (usage.get('profiling_gpu_hours', 0) + estimate > budget.max_profiling_gpu_hours
                 or usage.get('gpu_hours', 0) + estimate > budget.max_total_gpu_hours):
             return dict(status='OUT_OF_BUDGET')
         request = dict(trial['plan']['backend_config'])
-        request.update(run_id=request['run_id'] + '-load-validation', warmup=1, measured=1,
+        request.update(run_id=validation_id, warmup=1, measured=1,
             validation_mode='checkpoint_load_and_single_training_step',
             port=24600 + int(trial['plan_hash'][:6], 16) % 1000,
             max_allocation_seconds=max(1,
@@ -5413,8 +5420,11 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
                     budget.max_walltime_seconds - self.store.search_seconds() - 15)))
         if stored.is_file():
             request['max_allocation_seconds'] = json.loads(stored.read_text())['max_allocation_seconds']
-        result, directory = self.execute_receipted(request, identity=trial['plan_hash'] + ':load-validation',
+        result, directory = self.execute_receipted(request,
+            identity=retry.get('execution_id', trial['plan_hash']) + ':load-validation',
             category='validation')
+        if result is None:
+            return dict(status='OUT_OF_BUDGET')
         result = json.loads((directory / 'result.json').read_text())
         result['validation_scope'] = 'checkpoint_load_initialization_forward_backward_optimizer_two_steps'
         witness = None
@@ -5426,10 +5436,6 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
         elif result['status'] != 'PASS':
             witness = classify_failure(result, trial['plan'], 'load_validation')
             self.store.add_evidence(witness['witness_id'], 'FAILURE', witness)
-        hours = world * result['gpu_allocation_seconds'] / 3600
-        identity = trial['plan_hash'] + ':load-validation'
-        self.store.charge(identity + ':gpu', 'gpu_hours', hours)
-        self.store.charge(identity + ':profile', 'profiling_gpu_hours', hours)
         evidence_id = result['run_id']
         self.store.add_evidence(evidence_id,
             'MEASURED' if result['status'] == 'PASS' else 'FAILURE', result)
@@ -5443,7 +5449,8 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
         namespaced = run_id + ('-' + self.config.run_namespace if self.config.run_namespace else '')
         return self.output / ('profiling' if profile else 'training') / 'runs' / namespaced
 
-    def execute_receipted(self, request, *, identity, category, profile=False, prediction=None):
+    def execute_receipted(self, request, *, identity, category, profile=False, prediction=None,
+                          trial_id=None, exploration=False):
         directory = self.execution_directory(request['run_id'], profile=profile)
         run_id = directory.name
         gpu_count = request['node_count'] * request['gpus_per_node']
@@ -5453,9 +5460,11 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
                 request['max_allocation_seconds'] * gpu_count / 3600,
                 self.config.budget.max_total_gpu_hours, self.config.budget.max_profiling_gpu_hours)
             if not reserved:
-                raise SearchBudgetExhausted('正式 GPU 预算不足，未分配新运行')
+                return None, directory
+        def confirmed():
+            self.store.record_gpu_launch(identity, category, trial_id, exploration)
         try:
-            return self.adapter.execute(request, prediction, profile=profile)
+            return self.adapter.execute(request, prediction, profile=profile, launch_confirmed=confirmed)
         finally:
             completed = directory / 'allocation-completed.json'
             result = directory / 'result.json'
@@ -5465,6 +5474,38 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
             elif not allocation.is_file():
                 self.store.release_gpu_execution(identity)
 
+    def resume_training_attempts(self):
+        if self.prepare_only or not self.config.gpu_execution_enabled:
+            return
+        for trial in self.store.trials():
+            identifier = trial['trial_id']
+            authorization = self.config.training_retries.get(identifier)
+            retry = trial.get('training_retry') or {}
+            if authorization is not None:
+                record = authorization.model_dump()
+                if record != retry.get('authorization'):
+                    failure = trial.get('failure') or {}
+                    if (failure.get('retry_eligibility') != authorization.resolved_condition
+                            or authorization.failed_run_id not in failure.get('evidence_refs', ())
+                            or authorization.evidence_reference == authorization.failed_run_id):
+                        raise ValueError(f'重试依据与已登记的失败条件不符：{identifier}')
+                    history = [*trial.get('attempt_history', []), {key: trial.get(key) for key in
+                        ('training_retry', 'measurement', 'failure', 'validation', 'completed_at')}]
+                    retry_key = fingerprint(dict(plan_hash=trial['plan_hash'], authorization=record))
+                    retry = dict(authorization=record, execution_id=retry_key,
+                        run_id=trial['plan']['backend_config']['run_id'] + '-retry-' + retry_key[:12])
+                    validation = dict(trial.get('validation') or {})
+                    validation.pop('load_validation', None)
+                    trial = self.store.update_trial(identifier, state='PENDING', measurement=None,
+                        failure=None, completed_at=None, validation=validation, training_retry=retry,
+                        attempt_history=history)
+            run_id = retry.get('run_id', trial['plan']['backend_config']['run_id'])
+            execution_id = retry.get('execution_id', trial['plan_hash'])
+            started = (self.execution_directory(run_id) / 'allocation.json').is_file()
+            if trial.get('measurement') is None and not trial.get('failure') and (
+                    retry or started or trial['state'] == 'RUNNING'):
+                self.execute_trial(trial, exploration=self.store.charged(execution_id + ':exploration') is not None)
+
     def execute_trial(self, trial, exploration=False):
         if self.prepare_only:
             raise ValueError('首轮预规划阶段不执行GPU训练')
@@ -5472,6 +5513,8 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
             return trial
         if trial.get('failure'):
             return None
+        retry = trial.get('training_retry') or {}
+        identity = retry.get('execution_id', trial['plan_hash'])
         if not self.config.gpu_execution_enabled:
             self.store.update_trial(trial['trial_id'], state='DEFERRED',
                 failure=dict(reason='当前配置关闭GPU执行，保留完整候选'))
@@ -5497,21 +5540,23 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
                 validation_status=validation['status']))
             if validation['status'] != 'PASS':
                 return None
-        self.check_walltime()
         usage = self.store.usage()
         budget = self.config.budget
         world = self.topology.num_gpus
         estimate = budget.estimated_trial_seconds * world / 3600
+        self.store.record_session_time(self.session_id, time.perf_counter() - self.started)
         remaining_search_seconds = budget.max_walltime_seconds - self.store.search_seconds()
-        if remaining_search_seconds < budget.estimated_trial_seconds:
-            return None
-        reserved = self.store.charged(trial['plan_hash'] + ':trial') is not None
-        if not reserved and (usage.get('full_training_trials', 0) >= budget.max_full_training_trials
+        run_id = retry.get('run_id', trial['plan']['backend_config']['run_id'])
+        reserved = (self.store.charged(identity + ':trial') is not None
+            or (self.execution_directory(run_id) / 'allocation.json').is_file())
+        if not reserved and (remaining_search_seconds < budget.estimated_trial_seconds
+            or usage.get('full_training_trials', 0) >= budget.max_full_training_trials
             or usage.get('gpu_hours', 0) + estimate > budget.max_total_gpu_hours):
+            self.store.update_trial(trial['trial_id'], state='OUT_OF_BUDGET')
             return None
         request = dict(trial['plan']['backend_config'])
-        request.update(warmup=self.config.benchmark_warmup, measured=self.config.benchmark_measured)
-        request['port'] = 23600 + int(trial['plan_hash'][:6], 16) % 1000
+        request.update(run_id=run_id, warmup=self.config.benchmark_warmup, measured=self.config.benchmark_measured)
+        request['port'] = 23600 + int(identity[:6], 16) % 1000
         remaining_gpu_seconds = max(1,
             (budget.max_total_gpu_hours - usage.get('gpu_hours', 0)) * 3600 / world - 30)
         declared_trial_seconds = request.get('max_allocation_seconds')
@@ -5531,15 +5576,16 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
             if stored.is_file():
                 request['max_allocation_seconds'] = json.loads(stored.read_text())['max_allocation_seconds']
         if exploration:
-            reservation = trial['plan_hash'] + ':exploration'
+            reservation = identity + ':exploration'
             if (self.store.charged(reservation) is None and self.store.usage().get('exploration_trials', 0)
                     >= self.config.uncalibrated_exploration_trials):
                 return None
-            self.store.charge(reservation, 'exploration_trials', 1)
-        self.store.charge(trial['plan_hash'] + ':trial', 'full_training_trials', 1)
-        self.store.update_trial(trial['trial_id'], state='RUNNING')
-        result, directory = self.execute_receipted(request, identity=trial['plan_hash'], category='benchmark',
-            prediction=None if exploration else trial['prediction'])
+        result, directory = self.execute_receipted(request, identity=identity, category='benchmark',
+            prediction=None if exploration else trial['prediction'], trial_id=trial['trial_id'],
+            exploration=exploration)
+        if result is None:
+            self.store.update_trial(trial['trial_id'], state='OUT_OF_BUDGET')
+            return None
         result = json.loads((directory / 'result.json').read_text())
         witness = None
         if 'OOM' in result['status']:
@@ -5552,8 +5598,6 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
             if witness is not None:
                 self.store.add_evidence(witness['witness_id'], 'FAILURE', witness)
         self.store.add_evidence(result['run_id'], 'MEASURED' if result['status'] == 'PASS' else 'FAILURE', result)
-        seconds = result['gpu_allocation_seconds']
-        self.store.charge(trial['plan_hash'] + ':gpu', 'gpu_hours', world * seconds / 3600)
         if self.config.budgeted_investigation_enabled:
             prediction = trial['prediction']
             result['prediction_at_execution'] = dict(prediction_id=prediction['prediction_id'],
@@ -6385,6 +6429,7 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
             return self.finish()
 
     def run_loop(self):
+        self.resume_training_attempts()
         if self.config.planning_control_enabled and self.config.evaluation_mode in ('full', 'multi_agent'):
             return self.run_investigation_loop()
         full_agents = (self.config.agent_execution_enabled
@@ -6395,10 +6440,6 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
             raise ValueError('完整四Agent流程要求max_llm_calls_per_round=4；工具追问受max_agent_calls限制')
         if full_agents and self.config.max_tool_rounds < 1:
             raise ValueError('Constraint and Validation Agent需要至少一轮确定性工具调用')
-        for trial in self.store.trials():
-            if trial['state'] == 'RUNNING' and trial['measurement'] is None:
-                self.execute_trial(trial, exploration=self.store.charged(
-                    trial['plan_hash'] + ':exploration') is not None)
         best = self.initialize()
         if best is None:
             return self.finish()

@@ -59,11 +59,13 @@ class FastPredictor:
         self.model_graph = deepcopy(model_graph)
         hardware_parameters = deepcopy(hardware_parameters)
         resource_replay = dict(hardware_parameters.get('resource_replay', {}))
+        resource_replay['strict_overlap_conditions'] = True
         measured = [dict(compute_kind=row['benchmark']['compute_kind'],
             collective=row['benchmark']['collective'],
             physical_group_ranks=row['benchmark']['group_ranks'],
             payload_bytes=row['benchmark']['payload_bytes'], gamma=row['benchmark']['gamma'],
-            evidence_ids=[row['id']], source=row['benchmark']['source'])
+            evidence_ids=[row['id']], source=row['benchmark']['source'],
+            condition=row['benchmark'].get('condition'), samples=row['benchmark']['samples'])
             for row in self.database.overlap_profiles()]
         resource_replay['compute_communication_slowdowns'] = [
             *resource_replay.get('compute_communication_slowdowns', []), *measured]
@@ -168,7 +170,8 @@ class FastPredictor:
         rows = resource_replay.setdefault('compute_communication_slowdowns', [])
         record = dict(compute_kind=benchmark['compute_kind'], collective=benchmark['collective'],
             physical_group_ranks=benchmark['group_ranks'], payload_bytes=benchmark['payload_bytes'],
-            gamma=benchmark['gamma'], evidence_ids=[identifier], source=benchmark['source'])
+            gamma=benchmark['gamma'], evidence_ids=[identifier], source=benchmark['source'],
+            condition=benchmark.get('condition'), samples=benchmark['samples'])
         if record not in rows:
             rows.append(record)
 

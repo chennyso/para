@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'paramorph'))
 from schedule_validator import ScheduleValidator
 from hybrid_node import launch_geometry
-from predictor.runtime_receipt import effective_runtime_receipt
+from predictor.runtime_receipt import validate_training_result
 PODS = tuple(os.environ.get('PARAMELD_TRAINER_PODS', '').split())
 REMOTE = Path(os.environ.get('PARAMELD_REMOTE_RUNS', '/workspace/frontier/hybrid-performance-20261008'))
 
@@ -213,7 +213,7 @@ def launch_training_node(node, request, run):
 
 
 def execute(request, output, nodes, resume_existing=False, extra_sources=None, metadata_archive=None,
-            release_allocation=None, source_overrides=None, collection_mode=None):
+            release_allocation=None, source_overrides=None, collection_mode=None, launch_confirmed=None):
     node_count = request.get('node_count', 2)
     world = node_count * request.get('gpus_per_node', 8)
     workers, devices_per_worker = launch_geometry(request)
@@ -306,12 +306,29 @@ def execute(request, output, nodes, resume_existing=False, extra_sources=None, m
             raise ValueError(f'已结束的实验缺少原始节点执行记录：{remote}')
     else:
         start_nodes = nodes
-    if len(start_nodes) == len(nodes):
-        write(allocation_path, dict(started_unix_seconds=time.time(), allocated_devices=world))
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, workers)) as pool:
+        launch_path = directory / 'launch-confirmed.json'
+        def confirm_launch():
+            if not launch_path.is_file():
+                write(launch_path, dict(run_id=request['run_id'], observed_unix_seconds=time.time()))
+            if launch_confirmed is not None:
+                launch_confirmed()
+        if resume_existing and len(start_nodes) < len(nodes):
+            confirm_launch()
         if start_nodes:
             list(pool.map(lambda node: node_action(node, request, 'preflight', remote), start_nodes))
-            list(pool.map(lambda node: launch_training_node(node, request, remote), start_nodes))
+            if len(start_nodes) == len(nodes):
+                started = time.monotonic()
+                write(allocation_path, dict(started_unix_seconds=time.time(), allocated_devices=world))
+            launch_errors = []
+            for future in concurrent.futures.as_completed(
+                    [pool.submit(launch_training_node, node, request, remote) for node in start_nodes]):
+                if future.exception() is None:
+                    confirm_launch()
+                else:
+                    launch_errors.append(future.exception())
+            if launch_errors:
+                raise launch_errors[0]
         start_walltime = json.loads(allocation_path.read_text())['started_unix_seconds']
         remote_limit = request.get('max_allocation_seconds')
         peer_failed = False
@@ -361,8 +378,9 @@ def execute(request, output, nodes, resume_existing=False, extra_sources=None, m
         record['pvc_raw_artifacts'] = record['raw_artifacts']
         record['raw_artifacts'] = str(artifacts)
         if record['status'] == 'PASS':
-            manifests = [json.loads((artifacts / f'rank{rank}.manifest.json').read_text()) for rank in range(world)]
-            record.update(effective_runtime_receipt(request, sources, manifests))
+            rank_paths = [artifacts / f'rank{rank}.manifest.json' for rank in range(world)]
+            manifests = [json.loads(path.read_text()) for path in rank_paths if path.is_file()]
+            validate_training_result(record, request, sources, manifests)
         write(directory / 'result.json', record)
         print(json.dumps({key: record.get(key) for key in ('run_id', 'status', 'tokens_per_second',
             'step_seconds', 'peak_allocated_gib', 'gpu_allocation_seconds')}), flush=True)
@@ -416,6 +434,7 @@ def execute(request, output, nodes, resume_existing=False, extra_sources=None, m
                 or overlap['group_ranks'] != request['overlap_group_ranks']
                 or overlap['payload_bytes'] != request['overlap_payload_bytes']
                 or overlap['compute_shape'] != request['overlap_compute_shape']
+                or overlap.get('condition') != request['overlap_condition']
                 or overlap['gamma'] < 1 or not overlap['samples']):
             raise ValueError('计算通信并发测量没有覆盖请求的Kernel Shape与Collective')
         record.update(status='PASS', overlap_benchmark=overlap,
@@ -438,6 +457,9 @@ def execute(request, output, nodes, resume_existing=False, extra_sources=None, m
                or not row['progress']['valid'] for rank, row in enumerate(rows)):
             raise ValueError('实际NCCL通信测试没有完成进展验证')
         record.update(status='PASS', validation_scope=rows[0]['validation_scope'], protocol_results=rows)
+    elif any(not (artifacts / f'rank{rank}.{suffix}.json').is_file() for rank in range(world)
+            for suffix in ('manifest', 'measurements')):
+        record.update(status='VALIDATION_FAILED', runtime_validation_error='逐 Rank 回执未覆盖全部设备')
     else:
         rows = [json.loads((artifacts / f'rank{rank}.measurements.json').read_text()) for rank in range(world)]
         manifests = [json.loads((artifacts / f'rank{rank}.manifest.json').read_text()) for rank in range(world)]
@@ -461,27 +483,6 @@ def execute(request, output, nodes, resume_existing=False, extra_sources=None, m
                 raise ValueError('The hybrid timing or input accounting differs from the request')
             if not all(step['optimizer_update_successful'] for step in row['steps']):
                 raise ValueError('A hybrid optimizer update failed')
-            for key in ('tp', 'cp', 'pp', 'ep', 'vpp', 'sequence', 'micro_batch', 'global_batch'):
-                if key == 'cp' and key not in manifest:
-                    if manifest['world'] != manifest['tp'] * manifest['pp']:
-                        raise ValueError('历史记录缺少CP，现有Rank数量无法唯一确定CP')
-                    actual_value = 1
-                    record.setdefault('parallel_configuration_proofs', []).append(dict(rank=rank,
-                        cp=1, dp=1, constraint='world = tp * pp * cp * dp; world = tp * pp'))
-                else:
-                    actual_value = manifest[key]
-                if actual_value != request[key]:
-                    raise ValueError('The actual hybrid parallel configuration differs from the request')
-            for key, expected in (
-                ('etp', request.get('etp', request['tp'])),
-                ('expert_dp', world // (request.get('etp', request['tp']) * request['ep'] * request['pp'])),
-                ('dp', request['dp']), ('optimizer_sharding', request.get('optimizer_sharding', 'distributed'))):
-                if key in manifest and manifest[key] != expected:
-                    raise ValueError('实际Expert并行、DP或者Optimizer Sharding与执行计划不同')
-        if request.get('record_native_schedule'):
-            from scheduling.native_microbatches import verify_native_schedule
-            record['native_pipeline_schedule'] = verify_native_schedule(request, manifests)
-        record.update(effective_runtime_receipt(request, sources, manifests))
         window = max(row['window_seconds'] for row in rows)
         record.update(status='PASS', performance_eligible=not (request.get('profile', False)
             or request.get('instrumented', False) or request.get('validation_mode')),
@@ -554,6 +555,7 @@ def execute(request, output, nodes, resume_existing=False, extra_sources=None, m
                     raise ValueError('Falcon recomputation lacks actual forward and backward execution evidence')
                 record.update(checkpoint_forward_calls=sum(calls), actual_layer_executions=sum(executions),
                     recomputation_executed=True)
+        validate_training_result(record, request, sources, manifests)
     archive = directory / 'artifacts.tar.gz'
     with tarfile.open(archive, 'w:gz', compresslevel=1) as package:
         package.add(artifacts, arcname='artifacts')

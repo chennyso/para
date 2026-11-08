@@ -126,7 +126,8 @@ class MegatronAdapter:
                 topology_source='physical_host_grouped_from_verified_per_gpu_workers'))
         return merged
 
-    def execute(self, request, prediction=None, profile=False, numerical=False, bounded_adam_source=None):
+    def execute(self, request, prediction=None, profile=False, numerical=False, bounded_adam_source=None,
+                launch_confirmed=None):
         maximum_tp = tensor_parallel_limit(request)
         if type(request['tp']) is not int or not 1 <= request['tp'] <= maximum_tp:
             raise ValueError(f'实际训练的Tensor并行度必须满足1≤TP≤{maximum_tp}')
@@ -168,8 +169,12 @@ class MegatronAdapter:
             request.update(instrumented=True, paramorph=True, paramorph_numerical_reference=True)
         output = self.output / ('numerical' if numerical else 'profiling' if profile else 'training')
         directory = output / 'runs' / request['run_id']
+        if not (directory / 'request.json').exists():
+            request.setdefault('record_native_schedule', True)
         if (directory / 'request.json').exists():
             stored = json.loads((directory / 'request.json').read_text())
+            if 'record_native_schedule' in stored:
+                request.setdefault('record_native_schedule', stored['record_native_schedule'])
             compared = dict(request)
             if prediction is not None:
                 compared['prediction_gate'] = stored.get('prediction_gate')
@@ -181,6 +186,8 @@ class MegatronAdapter:
                 result = json.loads(result_path.read_text())
                 if result['run_id'] != stored['run_id']:
                     raise ValueError('已收集的结果与原始运行编号不同')
+                if launch_confirmed is not None and (directory / 'allocation-completed.json').is_file():
+                    launch_confirmed()
                 return result, directory
         sources = {}
         if 'fp16_bounded_adam_sha256' in request:
@@ -232,6 +239,7 @@ class MegatronAdapter:
             try:
                 result = self.runner.execute(request, output, self.nodes, extra_sources=sources,
                     collection_mode=collection_mode, release_allocation=release_allocation,
+                    launch_confirmed=launch_confirmed,
                     resume_existing=(directory / 'request.json').exists() and not (directory / 'result.json').exists())
             finally:
                 if not released:

@@ -122,7 +122,7 @@ class ExperimentStore:
             raise ValueError('实验记录不存在')
         document = json.loads(row[0])
         if set(fields) - {'validation', 'prediction', 'measurement', 'measurement_reuse',
-                'state', 'failure', 'trace', 'completed_at'}:
+                'state', 'failure', 'trace', 'completed_at', 'training_retry', 'attempt_history'}:
             raise ValueError('实验更新包含未知字段')
         document.update(fields)
         self.connection.execute('UPDATE trials SET document=? WHERE id=?',
@@ -185,6 +185,33 @@ class ExperimentStore:
         self.connection.execute('UPDATE gpu_execution_reservations SET active=0 WHERE id=?', (identity,))
         self.connection.commit()
 
+    def record_gpu_launch(self, identity, category, trial_id=None, exploration=False):
+        with self.connection:
+            self.connection.execute('BEGIN IMMEDIATE')
+            reservation = self.connection.execute(
+                'SELECT category FROM gpu_execution_reservations WHERE id=?', (identity,)).fetchone()
+            if reservation != (category,) and self.charged(identity + ':gpu') is None:
+                raise ValueError('GPU 启动回执缺少对应的费用预留')
+            if category == 'benchmark':
+                row = self.connection.execute('SELECT document FROM trials WHERE id=?', (trial_id,)).fetchone()
+                document = json.loads(row[0])
+                self.connection.execute('INSERT OR IGNORE INTO charges VALUES (?, ?, 1)',
+                    (identity + ':trial', 'full_training_trials'))
+                if exploration:
+                    self.connection.execute('INSERT OR IGNORE INTO charges VALUES (?, ?, 1)',
+                        (identity + ':exploration', 'exploration_trials'))
+                if document.get('measurement') is None:
+                    document['state'] = 'RUNNING'
+                    self.connection.execute('UPDATE trials SET document=? WHERE id=?',
+                        (json.dumps(document, allow_nan=False), trial_id))
+            elif category == 'profiling':
+                row = self.connection.execute('SELECT document FROM profiling_requests WHERE id=?', (identity,)).fetchone()
+                document = json.loads(row[0])
+                if document.get('result') is None:
+                    document['state'] = 'RUNNING'
+                    self.connection.execute('UPDATE profiling_requests SET document=? WHERE id=?',
+                        (json.dumps(document, allow_nan=False), identity))
+
     def record_gpu_receipt(self, identity, run_id, category, gpu_count, receipt):
         if category not in ('profiling', 'validation', 'benchmark') or type(gpu_count) is not int or gpu_count < 1:
             raise ValueError('GPU 回执需要明确的运行类别和设备数量')
@@ -194,10 +221,19 @@ class ExperimentStore:
         if type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds < 0:
             raise ValueError('GPU 占用时间需要有限的实测秒数')
         hours = gpu_count * seconds / 3600
-        self.charge(identity + ':gpu', 'gpu_hours', hours)
+        charges = [(identity + ':gpu', 'gpu_hours', hours)]
         if category != 'benchmark':
-            self.charge(identity + ':profile', 'profiling_gpu_hours', hours)
-        self.release_gpu_execution(identity)
+            charges.append((identity + ':profile', 'profiling_gpu_hours', hours))
+        with self.connection:
+            self.connection.execute('BEGIN IMMEDIATE')
+            for identifier, resource, amount in charges:
+                previous = self.charged(identifier)
+                if previous is not None and previous != (resource, amount):
+                    raise ValueError('实际 GPU 费用与已登记回执不同')
+                if previous is None:
+                    self.connection.execute('INSERT INTO charges VALUES (?, ?, ?)', (identifier, resource, amount))
+                    self.record_actual_cost_checkpoint('resource_charged', identifier)
+            self.connection.execute('UPDATE gpu_execution_reservations SET active=0 WHERE id=?', (identity,))
         self.add_search_state('GPU_EXECUTION_RECEIPT', dict(run_id=run_id, category=category,
             gpu_hours=hours, status=receipt.get('status', 'COLLECTION_PENDING')))
         return hours

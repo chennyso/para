@@ -25,6 +25,10 @@ ParaMorph 面向 Megatron-LM 生成完整训练计划，联合搜索全局混合
 
 Agent 共享 TrainingPlan、Executable DAG、GraphDelta、Evidence、成本版本、测量记录和家族状态的身份引用。完整 DAG 保存在后端，工具分页返回真实 Task、Region、Flow、通信参与 Rank、依赖与证据。每个角色接收对应职责的紧凑上下文。完整四角色流程使用 `max_llm_calls_per_round=4`；工具追问的 Provider 请求独立计入总调用与 Token 预算。
 
+训练重试通过 `SystemConfig.training_retries` 配置，以候选编号为键。每项记录填写 `failed_run_id`、`resolved_condition`、`evidence_reference` 与 `reason`，分别指向失败运行、已经解决的重试条件、新证据和处理经过。环境故障、无效测量、待调查故障分别使用 `requires_changed_environment`、`requires_changed_measurement`、`requires_investigation`。重试生成独立运行编号，保留原始运行和逐次费用。确定性执行错误和数值错误需要提交生效配置有相关变化的新候选。
+
+盲测排序验收使用 `experiments/evaluate_prediction_pairs.py`。`independent_repeat_block` 标记相同工作负载和成本版本下的独立配对重复；同一次训练内的多步计时不能分别作为独立重复。至少三个完整配对才计算步时差的 95% 区间。区间覆盖零的比较和重复不足的比较单独标记，排序准确率以可区分的候选对计算。
+
 ## 条件化联合搜索
 
 `ConditionalPartitionSolver` 固定 H，枚举声明支持的 VPP、MBS、重计算、Microbatch 分组、状态分片与相关执行选项。`fixed_values`、`preserve` 和 `allowed_ranges` 在候选枚举前共同约束搜索空间。

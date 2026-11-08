@@ -1,4 +1,5 @@
 from collections import defaultdict
+import json
 from dataclasses import dataclass, field
 from graphlib import TopologicalSorter
 import heapq
@@ -144,6 +145,15 @@ class ScheduleCostEvaluator:
         for communication in communications:
             collective = communication.metadata.get('collective',
                 communication.metadata.get('operation', communication.task_type.value))
+            ranks = communication.metadata.get('physical_group_ranks', communication.metadata.get('group_ranks', []))
+            kernel = compute.metadata.get('overlap_kernel')
+            payload = communication.metadata.get('payload_bytes')
+            dtype = communication.metadata.get('pipeline_dtype') or communication.metadata.get('dtype') or communication.metadata.get('communication_dtype')
+            mode = communication.metadata.get('concurrency_mode', 'async_collective')
+            condition = (dict(kernel, collective=collective, physical_group_ranks=list(ranks),
+                payload_bytes=payload, communication_dtype=dtype, concurrency_mode=mode,
+                communication_resources=sorted(communication.resource_requirements))
+                if kernel and ranks and payload and dtype else None)
             candidates = [row for row in records
                 if row['compute_kind'] in (compute.task_type.value, compute.metadata.get('operation'))
                 and row['collective'] in (collective, communication.task_type.value)
@@ -153,10 +163,14 @@ class ScheduleCostEvaluator:
                 and (row.get('payload_bytes') is None
                     or row['payload_bytes'] == communication.metadata.get('payload_bytes'))
                 and compute.rank in communication.metadata.get('participant_ranks',
-                    communication.metadata.get('group_ranks', [communication.rank]))]
+                    communication.metadata.get('group_ranks', [communication.rank]))
+                and (not resource_model.get('strict_overlap_conditions')
+                    or condition is not None and row.get('condition') == condition)]
             if candidates:
                 row = max(candidates, key=lambda item: item['gamma'])
-                gamma = row['gamma']
+                physical_rank = compute.metadata.get('physical_rank', compute.rank)
+                matched_rank = [sample['gamma'] for sample in row.get('samples', []) if sample['rank'] == physical_rank]
+                gamma = max(1.0, matched_rank[0]) if matched_rank else row['gamma']
                 if type(gamma) not in (int, float) or not math.isfinite(gamma) or gamma < 1:
                     raise ValueError('计算通信重叠减速系数必须为不小于一的有限数值')
                 matched.append((communication.task_id, float(gamma), row.get('evidence_ids', [])))
@@ -165,7 +179,7 @@ class ScheduleCostEvaluator:
                     tuple(communication.metadata.get('physical_group_ranks',
                         communication.metadata.get('group_ranks', []))),
                     compute.task_id, communication.task_id,
-                    communication.metadata.get('payload_bytes'))
+                    payload or 0, json.dumps(condition, sort_keys=True))
                 missing.add(identity)
                 # 缺失项仅进入诊断；回放时间不能作为已标定结果用于排序。
         gamma = max([1.0] + [row[1] for row in matched])
@@ -327,7 +341,7 @@ class ScheduleCostEvaluator:
             compute_communication_overlap_intervals=overlap_intervals,
             missing_overlap_profiles=[dict(compute_kind=row[0], collective=row[1],
                 physical_group_ranks=list(row[2]), compute_task_id=row[3],
-                communication_task_id=row[4], payload_bytes=row[5])
+                communication_task_id=row[4], payload_bytes=row[5] or None, condition=json.loads(row[6]))
                 for row in sorted(missing_overlap)],
             bandwidth_policy='dynamic_equal_share_per_contended_physical_resource',
             compute_progress_policy='integral_of_inverse_calibrated_overlap_gamma')

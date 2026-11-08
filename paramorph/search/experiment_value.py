@@ -58,8 +58,11 @@ def experiment_value(request, prediction, history, best, estimated_seconds, *, a
     step = prediction.get('performance', {}).get('step_time_ms')
     step = step if step is not None and math.isfinite(step) and step > 0 else None
     residuals, costs, runs, validity, seen = [], [], [], [], set()
+    outcomes = dict(environment=0, invalid_measurement=0, unclassified=0, execution_failures=0)
     world = request['node_count'] * request['gpus_per_node']
-    for trial in history:
+    attempts = (dict(attempt, plan=trial['plan']) for trial in history
+        for attempt in (*trial.get('attempt_history', ()), trial))
+    for trial in attempts:
         other = trial['plan']['backend_config']
         if not same_condition(request, other, WORKLOAD_FIELDS + STRATUM_FIELDS):
             continue
@@ -75,8 +78,20 @@ def experiment_value(request, prediction, history, best, estimated_seconds, *, a
             costs.append(seconds * world / 3600)
         success = measured.get('status') == 'PASS' and (action == 'LOAD_VALIDATION'
             or measured.get('performance_eligible') is True)
-        if success or measured.get('status') in ('CUDA_OOM', 'HOST_MEMORY_BUDGET_EXCEEDED'):
-            validity.append(success)
+        failure = measured.get('failure') or trial.get('failure') or {}
+        kind, status = failure.get('failure_type'), measured.get('status')
+        if success:
+            validity.append(True)
+        elif kind == 'ENVIRONMENT' or measured.get('execution_deadline_reached'):
+            outcomes['environment'] += 1
+        elif kind == 'INVALID_MEASUREMENT' or status in ('PASS', 'VALIDATION_FAILED'):
+            outcomes['invalid_measurement'] += 1
+        elif kind in ('CAPACITY', 'NUMERICAL_CORRECTNESS', 'DETERMINISTIC_CONFIGURATION', 'CHECKPOINT_FAILURE') or status in (
+                'CUDA_OOM', 'HOST_MEMORY_BUDGET_EXCEEDED'):
+            validity.append(False)
+            outcomes['execution_failures'] += 1
+        else:
+            outcomes['unclassified'] += 1
         snapshot = measured.get('prediction_at_execution') or {}
         if action == 'BENCHMARK' and success and snapshot.get('predictor_revision') == prediction.get(
                 'evidence', {}).get('predictor_revision') and snapshot.get('step_time_ms') is not None:
@@ -87,6 +102,7 @@ def experiment_value(request, prediction, history, best, estimated_seconds, *, a
     result = dict(predicted_step_ms=step, throughput_interval=None, predicted_gain=None,
         expected_gain=None, expected_improvement_per_gpu_hour=None, p_valid=p_valid,
         validity_observations=len(validity), expected_gpu_hours=cost,
+        observed_failure_categories=outcomes,
         cost_basis='same_workload_actual_gpu_receipts' if costs else 'declared_budget_estimate',
         cost_observations=len(costs), calibration_runs=runs, residual_observations=len(residuals),
         uncertainty='UNKNOWN', measurement_information='训练结果可更新吞吐与容量记录')

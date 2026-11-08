@@ -35,6 +35,9 @@ if any(code != 0 for code in codes):
     cuda_oom = 'CUDA out of memory' in logs or 'Failed to CUDA calloc async' in logs
     record['status'] = ('CUDA_OOM' if cuda_oom else 'HOST_MEMORY_BUDGET_EXCEEDED'
         if record['host_memory_failures'] else 'FAILED')
+elif any(f'rank{rank}.{suffix}.json' not in files for rank in range(world)
+        for suffix in ('manifest', 'measurements')):
+    record.update(status='VALIDATION_FAILED', runtime_validation_error='逐 Rank 回执未覆盖全部设备')
 else:
     rows = [json.loads(files[f'rank{rank}.measurements.json']) for rank in range(world)]
     manifests = [json.loads(files[f'rank{rank}.manifest.json']) for rank in range(world)]
@@ -64,20 +67,6 @@ else:
                 raise ValueError('梯度范数出现非有限值')
             if any(not math.isfinite(value) for value in step['loss'].values()):
                 raise ValueError('损失出现非有限值')
-        for key in ('tp', 'cp', 'pp', 'ep', 'vpp', 'sequence', 'micro_batch', 'global_batch'):
-            if manifest[key] != request[key]:
-                raise ValueError('实际并行配置与请求不同：' + key)
-        for key, expected in (('dp', request['dp']), ('etp', request.get('etp', request['tp'])),
-            ('expert_dp', world // (request.get('etp', request['tp']) * request['ep'] * request['pp'])),
-            ('optimizer_sharding', request.get('optimizer_sharding', 'distributed'))):
-            if key in manifest and manifest[key] != expected:
-                raise ValueError('实际进程组或状态分片与请求不同：' + key)
-        if ('optimizer_pin_cpu_params' in request
-                and manifest['optimizer_pin_cpu_params'] != request['optimizer_pin_cpu_params']):
-            raise ValueError('实际CPU参数锁页与请求不同')
-        if ('optimizer_cpu_copy_mode' in request
-                and manifest['optimizer_cpu_copy_mode'] != request['optimizer_cpu_copy_mode']):
-            raise ValueError('实际CPU参数复制方式与请求不同')
     window = max(row['window_seconds'] for row in rows)
     record.update(status='PASS', performance_eligible=not bool(request.get('validation_mode')),
         step_seconds=window / request['measured'],

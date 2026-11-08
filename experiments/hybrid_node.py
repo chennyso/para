@@ -278,6 +278,7 @@ def main():
             '--m', str(request['overlap_compute_shape']['M']),
             '--n', str(request['overlap_compute_shape']['N']),
             '--k', str(request['overlap_compute_shape']['K']),
+            '--condition-json', json.dumps(request['overlap_condition'], sort_keys=True),
             '--warmup', str(request['warmup']), '--iterations', str(request['measured'])]
     if request.get('nccl_profile', False) and (
             request.get('nccl_rank_groups') or request.get('nccl_payloads_bytes')):
