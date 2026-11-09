@@ -2,6 +2,7 @@ from predictor.profile_database import backend_reuse_evidence, same_training_pla
 from search.dag_agent_control import DAGAgentSearch
 from search.native_calibration_admission import admit_exact_native_calibration
 from search.system_search import profile_hardware_matches
+from contracts import fingerprint
 
 
 class CalibratedDAGAgentSearch(DAGAgentSearch):
@@ -10,7 +11,8 @@ class CalibratedDAGAgentSearch(DAGAgentSearch):
         if report['prediction_status'] != 'NEEDS_PROFILE':
             return report
         if (not (report.get('execution_graph') or {}).get('tasks')
-                or report.get('performance', {}).get('raw_resource_aware_step_time_ms') is None):
+                or report.get('performance', {}).get(
+                    'raw_resource_aware_step_time_ms') is None):
             return report
         matching = []
         for profile_id, profile in self.predictor.database.measured_profiles():
@@ -23,16 +25,42 @@ class CalibratedDAGAgentSearch(DAGAgentSearch):
             windows = profile.get('measured_windows', {})
             if len(windows) != self.topology.num_gpus:
                 continue
-            observed = sum(len(rows) for rows in windows.values())
+            count = sum(len(rows) for rows in windows.values())
             matching.append((
                 backend['status'] == 'MATCHED',
                 not profile['request'].get('paramorph_trace', False),
-                observed, profile_id, profile,
+                count, profile_id, profile,
             ))
         if not matching:
             return report
         _, _, _, profile_id, profile = max(matching, key=lambda item: item[:-1])
         return admit_exact_native_calibration(report, request, profile_id, profile)
+
+    def dag_task_guidance(self, parent):
+        prediction = parent.get('prediction') or {}
+        calibration = prediction.get('evidence', {}).get('native_calibration_admission')
+        if calibration is None:
+            return super().dag_task_guidance(parent)
+        graph, scope = self.bottleneck_graph(parent)
+        report = dict(
+            kind='dag_task_impact_guidance',
+            parent_trial_id=parent['trial_id'],
+            parent_plan_hash=parent['plan_hash'],
+            graph_id=graph.graph_id,
+            graph_scope=scope,
+            source_prediction_id=prediction['prediction_id'],
+            cost_revision=self.cost_revision,
+            status='MEASURED_TOTAL_TIME_WITH_UNCALIBRATED_PATHS',
+            task_groups=[],
+            native_calibration_profile_id=calibration['profile_id'],
+            critical_task_ids=prediction.get('diagnosis', {}).get(
+                'critical_tasks', [])[:12],
+            related_task_evidence_scope='structural_and_raw_dag_diagnostic',
+            performance_effect_scope='not_calibrated_for_task_level_impact',
+        )
+        identifier = fingerprint(report)
+        self.store.add_evidence(identifier, 'PREDICTED', report)
+        return dict(report, evidence_id=identifier)
 
     def execute_investigation(self, action):
         receipt = super().execute_investigation(action)
