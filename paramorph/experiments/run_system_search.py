@@ -6,6 +6,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from contracts import SystemConfig
+from search.gpu_budget_policy import unified_gpu_budget
 from search.system_search import EvidenceGuidedSearch
 
 
@@ -35,10 +36,14 @@ if __name__ == '__main__':
         document['hardware_topology_paths'] = [str(path.resolve())
             for path in args.hardware_topology_path]
     config = SystemConfig.model_validate(document)
+    config = config.model_copy(update=dict(budget=unified_gpu_budget(config.budget)))
     args.output.mkdir(parents=True, exist_ok=True)
     stored = args.output / 'system-config.json'
-    if stored.is_file() and SystemConfig.model_validate_json(stored.read_text()) != config:
-        raise ValueError('同一搜索目录中的模型、方法和预算配置必须保持一致')
+    if stored.is_file():
+        previous = SystemConfig.model_validate_json(stored.read_text())
+        previous = previous.model_copy(update=dict(budget=unified_gpu_budget(previous.budget)))
+        if previous != config:
+            raise ValueError('同一搜索目录中的模型、方法和预算配置必须保持一致')
     stored.write_text(config.model_dump_json(indent=2) + '\n')
     report = EvidenceGuidedSearch(config).run()
     print(json.dumps(dict(best_plan=report['best_measured']['plan_hash'] if report['best_measured'] else None,
