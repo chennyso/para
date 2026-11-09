@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from contracts import SystemConfig
 from search.gpu_budget_policy import unified_gpu_budget
+from search.native_calibration_search import CalibratedDAGAgentSearch
 from search.system_search import EvidenceGuidedSearch
 
 
@@ -45,6 +46,16 @@ if __name__ == '__main__':
         if previous != config:
             raise ValueError('同一搜索目录中的模型、方法和预算配置必须保持一致')
     stored.write_text(config.model_dump_json(indent=2) + '\n')
-    report = EvidenceGuidedSearch(config).run()
+
+    dag_agent_mode = (
+        config.planning_control_enabled
+        and config.planning_selector == 'agent'
+        and config.planning_partition_engine == 'path'
+        and config.agent_execution_enabled
+        and config.evaluation_mode in ('full', 'multi_agent')
+        and not config.single_decision_round
+    )
+    search = CalibratedDAGAgentSearch(config) if dag_agent_mode else EvidenceGuidedSearch(config)
+    report = search.run()
     print(json.dumps(dict(best_plan=report['best_measured']['plan_hash'] if report['best_measured'] else None,
         usage=report['usage'], gpu_execution_enabled=report['gpu_execution_enabled'])))
