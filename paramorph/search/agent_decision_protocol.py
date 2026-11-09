@@ -44,7 +44,8 @@ def review_conflicts(review, observation, trials):
     for row in review.candidate_verifications:
         if row.trial_id not in required:
             continue
-        prediction = by_id[row.trial_id]['prediction']
+        trial = by_id[row.trial_id]
+        prediction = trial['prediction']
         expected = dict(
             prediction_evidence_id=sources[row.trial_id],
             prediction_status=prediction['prediction_status'],
@@ -57,18 +58,21 @@ def review_conflicts(review, observation, trials):
         )
         if observed != expected:
             problems.append(dict(
-                trial_id=row.trial_id,
-                expected=expected,
-                submitted=observed,
-            ))
-        if row.recommended_action == 'BENCHMARK' and (
-                prediction['prediction_status'] == 'NEEDS_PROFILE'
-                or prediction['memory']['admission'] != 'WITHIN_ESTIMATED_CAPACITY'):
+                trial_id=row.trial_id, expected=expected, submitted=observed))
+        verified_memory = (trial.get('validation') or {}).get(
+            'load_validation') or {}
+        memory_ready = (
+            prediction['memory']['admission'] == 'WITHIN_ESTIMATED_CAPACITY'
+            or verified_memory.get('status') == 'PASS'
+        )
+        if (row.recommended_action == 'BENCHMARK'
+                and (prediction['prediction_status'] == 'NEEDS_PROFILE'
+                     or not memory_ready)):
             problems.append(dict(
                 trial_id=row.trial_id,
-                reason='当前成本或容量信息仍有缺项。'
-                    'Validation应建议补测或短程验证；'
-                    '明确的GPU探索例外由Evaluation Agent独立决定。',
+                reason='当前成本或容量仍未满足训练准入，'
+                    '应选择成本测量或真实训练步验证；'
+                    'GPU探索例外由Evaluation Agent明确授权。',
             ))
     return problems
 
@@ -107,17 +111,17 @@ def experiment_conflicts(decision, observation, trials, *, gpu_enabled,
             or len(load) != len(decision.load_validation_candidate_ids)
             or len(profiles) != len(decision.accepted_profiling_request_ids)):
         problems.append(dict(
-            reason='执行操作中存在重复的候选或者Profile请求'))
+            reason='执行操作中存在重复的候选或成本请求'))
     if chosen or load or profiles:
         if decision.stop_reason != 'CONTINUE':
             problems.append(dict(
                 field='stop_reason',
-                reason='选择实际执行操作时必须保持CONTINUE'))
+                reason='已经选择实际执行操作时应保持CONTINUE'))
         for identifier in profiles & available.keys():
             if not active_ids.intersection(available[identifier]['trial_ids']):
                 problems.append(dict(
                     request_id=identifier,
-                    reason='Profile请求没有关联当前候选'))
+                    reason='Profile请求没有关联本次候选'))
         return problems
 
     pending = [
@@ -125,37 +129,41 @@ def experiment_conflicts(decision, observation, trials, *, gpu_enabled,
         if row['state'] in ('PENDING', 'APPROVED', 'DEFERRED', 'OUT_OF_BUDGET')
         and active_ids.intersection(row['trial_ids'])
     ]
+    runnable = [
+        row for row in pending
+        if row['estimated_gpu_hours'] <= remaining_gpu_hours
+    ]
     by_id = {row['trial_id']: row for row in trials}
     unresolved = [
         identifier for identifier in active_ids
         if by_id[identifier]['prediction']['prediction_status'] == 'NEEDS_PROFILE'
     ]
-    if (gpu_enabled and remaining_gpu_hours > 0
-            and pending and unresolved):
+    if gpu_enabled and runnable and unresolved:
         problems.append(dict(
-            reason='合法候选仍需测量，且存在对应的Profile和GPU费用额度。'
-                '应选择具体测量并使用其结果继续评价。',
-            pending_profile_request_ids=[
-                row['request_id'] for row in pending],
+            reason='存在合法候选、缺失的性能成本及可执行测量请求。'
+                '应选择实际成本测量，或者提供可验证的资源障碍。',
+            runnable_profile_request_ids=[
+                row['request_id'] for row in runnable],
             unresolved_candidate_ids=sorted(unresolved),
         ))
     if decision.stop_reason == 'CONTINUE':
         problems.append(dict(
             field='stop_reason',
-            reason='没有实际执行操作时必须说明停止依据'))
+            reason='没有选择实际执行操作时必须说明停止依据'))
     if (decision.stop_reason == 'NO_GPU_BUDGET'
-            and gpu_enabled and remaining_gpu_hours > 0):
+            and gpu_enabled and remaining_gpu_hours > 0
+            and (runnable or not pending)):
         problems.append(dict(
             field='stop_reason',
-            reason='GPU实际费用账本仍有可用额度'))
+            reason='当前可用GPU预算及可执行请求与停止原因不一致'))
     if (decision.stop_reason == 'NO_EXECUTABLE_MEASUREMENT'
-            and pending and gpu_enabled and remaining_gpu_hours > 0):
+            and runnable and gpu_enabled):
         problems.append(dict(
             field='stop_reason',
-            reason='存在可执行的组件成本测量请求'))
+            reason='当前仍有费用额度内的实际成本测量请求'))
     if (decision.stop_reason == 'NO_IMPROVEMENT_WORTH_TESTING'
             and unresolved):
         problems.append(dict(
             field='stop_reason',
-            reason='仍有缺少性能成本的合法候选，无法断定没有收益'))
+            reason='仍有缺少性能成本的合法候选，无法确定没有改进空间'))
     return problems
