@@ -1,4 +1,5 @@
 httpx[socks]>=0.28,<1
+ijson
 matplotlib
 numpy
 networkx>=3
