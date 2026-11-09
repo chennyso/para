@@ -7,8 +7,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from contracts import SystemConfig
-from search.dag_agent_control import DAGAgentSearch
 from search.gpu_budget_policy import unified_gpu_budget
+from search.native_calibration_search import CalibratedDAGAgentSearch
 
 
 if __name__ == '__main__':
@@ -37,7 +37,7 @@ if __name__ == '__main__':
             raise ValueError('现有搜索目录中的模型、算法和预算配置与本次请求不同')
     stored.write_text(config.model_dump_json(indent=2) + '\n')
 
-    report = DAGAgentSearch(config).run()
+    report = CalibratedDAGAgentSearch(config).run()
     print(json.dumps(dict(
         best_plan=report['best_measured']['plan_hash']
             if report['best_measured'] else None,
