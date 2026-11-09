@@ -1,0 +1,29 @@
+name: ParaMeld agent integration checks
+
+on:
+  push:
+    branches:
+      - parameld/unified-gpu-budget-20261109
+  pull_request:
+    paths:
+      - 'paramorph/search/**'
+      - 'paramorph/experiments/run_dag_agent_search.py'
+      - 'paramorph/experiments/run_system_search.py'
+      - '.github/workflows/parameld-agent-checks.yml'
+
+jobs:
+  python-source-and-imports:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install project dependencies
+        run: python -m pip install -r paramorph/requirements.txt
+      - name: Compile actual Python sources
+        run: python -m compileall -q paramorph/search paramorph/experiments
+      - name: Verify real module imports and Agent schemas
+        working-directory: paramorph
+        run: |
+          python -c 'from search.native_calibration_search import CalibratedDAGAgentSearch; from search.agent_decision_protocol import EvidencedDAGReview, EvidencedExperimentDecision; from search.system_search import EvidenceGuidedSearch; assert issubclass(CalibratedDAGAgentSearch, EvidenceGuidedSearch); assert "candidate_verifications" in EvidencedDAGReview.model_fields; assert "stop_reason" in EvidencedExperimentDecision.model_fields'
