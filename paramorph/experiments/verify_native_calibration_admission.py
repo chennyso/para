@@ -3,6 +3,9 @@ import gzip
 import json
 from pathlib import Path
 import sqlite3
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from predictor.profile_database import (
     backend_reuse_evidence, profile_execution_request, same_training_plan,
@@ -49,12 +52,13 @@ def main():
     original = full_graph_prediction(trial['prediction'])
 
     with open_read_only(configuration['profile_database']) as database:
-        profiles = [dict(id=identifier, **json.loads(encoded),
-            registered_source_directory=directory)
-            for identifier, encoded, directory in database.execute(
-                'SELECT profiles.id, profiles.document, profile_sources.directory '
+        profiles = [
+            dict(json.loads(encoded), registered_source_directory=directory)
+            for encoded, directory in database.execute(
+                'SELECT profiles.document, profile_sources.directory '
                 'FROM profiles LEFT JOIN profile_sources '
-                'ON profiles.id=profile_sources.profile_id')]
+                'ON profiles.id=profile_sources.profile_id')
+        ]
     matching = []
     for profile in profiles:
         profile['request'] = profile_execution_request(
@@ -79,9 +83,9 @@ def main():
         'native_calibration_admission']['stable_step_ids']), reverse=True)
     report, profile = accepted[0]
     if report['prediction_status'] != 'PREDICTED_CALIBRATED':
-        raise ValueError('成本校准候选未获得独立标注的有效预测状态')
+        raise ValueError('成本校准候选未获得有效的校准预测状态')
     if report['memory']['admission'] != 'WITHIN_ESTIMATED_CAPACITY':
-        raise ValueError('实际相同配置的训练峰值仍未获得容量准入')
+        raise ValueError('真实相同配置的训练峰值未获得容量准入')
 
     evidence = report['evidence']['native_calibration_admission']
     print(json.dumps(dict(
