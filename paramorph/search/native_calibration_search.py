@@ -118,10 +118,10 @@ class CalibratedDAGAgentSearch(DAGAgentSearch):
                 and 'candidate_prediction_evidence' in observation):
             context['available_tools'] = []
             context['tool_usage'] = (
-                '本轮原生编译与完整约束检查已经完成。'
-                '逐项审查candidate_ids的原始预测、显存、成本缺失，'
-                '返回candidate_verifications并使用真实证据编号。'
-                '执行验证、组件测量和正式训练交给Evaluation Agent。')
+                '原生编译与完整约束检查已经完成。'
+                '逐项审查candidate_ids的预测、显存和成本缺项，'
+                '返回candidate_verifications和真实证据编号。'
+                '执行测量与训练交给Evaluation Agent。')
         return context
 
     def invoke_with_tools(self, role, instructions, observation, schema):
@@ -129,19 +129,18 @@ class CalibratedDAGAgentSearch(DAGAgentSearch):
             schema = EvidencedDAGReview
             instructions += (
                 '\n每项candidate_verifications必须引用'
-                'candidate_prediction_evidence对应的真实预测编号，'
-                '准确复述预测与显存状态，并解释补测、训练步验证'
-                '或正式训练的选择理由。'
-                'admitted_candidate_ids包含全部原生合法候选。')
+                'candidate_prediction_evidence中的真实编号，'
+                '准确复述预测及显存状态，并解释推荐操作。'
+                'admitted_candidate_ids包含全部结构合法候选。')
         elif (role == 'ExperimentInvestigationAgent'
                 and schema is InvestigationSelection):
             schema = EvidencedExperimentDecision
             self._dag_evaluation_observation = observation
             instructions += (
                 '\nProfile选择必须来自profiling_requests。'
-                '存在合法候选、性能成本缺项及可执行Profile时应选择实际测量。'
-                '没有选择任何操作时，必须填写能够验证的stop_reason。'
-                '每次完成Profile后根据最新成本重新选择训练对象。')
+                '若合法候选缺少性能成本且有可执行Profile，选择实际测量。'
+                '没有选择任何操作时提供可核查的stop_reason。'
+                'Profile完成后依据最新成本重新选择正式训练对象。')
         return super().invoke_with_tools(
             role, instructions, observation, schema)
 
@@ -159,8 +158,8 @@ class CalibratedDAGAgentSearch(DAGAgentSearch):
             status='REVISION_REQUIRED',
             revision_owner='ConstraintValidationAgent',
             conflicts=conflicts,
-            instruction='依据真实预测和显存记录逐项修订。'
-                '禁止声明尚未完成的成本采集或训练步验证已经通过。')
+            instruction='依据真实预测及显存记录修订。'
+                '不能将待测量状态声明为已经完成的成本或容量验证。')
         tool = dict(tool='verify_dag_candidate_evidence')
         receipt = dict(tool=tool, result=result)
         identifier = fingerprint(dict(
@@ -178,10 +177,14 @@ class CalibratedDAGAgentSearch(DAGAgentSearch):
             return feedback
         observation = getattr(self, '_dag_evaluation_observation', None)
         if observation is None:
-            raise ValueError('DAG评价缺少本轮完整候选及Profile目录')
+            raise ValueError('DAG评价缺少当前候选及Profile目录')
         budget = self.config.budget
         usage = self.store.usage()
-        remaining = budget.max_total_gpu_hours - usage.get('gpu_hours', 0)
+        reserved = self.store.connection.execute(
+            'SELECT COALESCE(SUM(hours), 0) '
+            'FROM gpu_execution_reservations WHERE active=1').fetchone()[0]
+        remaining = max(0.0, budget.max_total_gpu_hours
+                        - usage.get('gpu_hours', 0) - reserved)
         conflicts = experiment_conflicts(
             response, observation, self.store.trials(),
             gpu_enabled=self.config.gpu_execution_enabled,
@@ -192,9 +195,9 @@ class CalibratedDAGAgentSearch(DAGAgentSearch):
             status='REVISION_REQUIRED',
             revision_owner='ExperimentInvestigationAgent',
             conflicts=conflicts, remaining_gpu_hours=remaining,
-            instruction='只选择真实存在并关联本轮候选的操作。'
-                '成本缺失时优先选择相容的Profile；'
-                '停止前必须提供费用账本和候选状态支持的原因。')
+            instruction='选择存在且关联本轮候选的真实操作。'
+                '成本缺失时检查相容的Profile；'
+                '停止前应提供候选和实际费用账本支持的原因。')
         tool = dict(tool='verify_dag_experiment_decision')
         receipt = dict(tool=tool, result=result)
         identifier = fingerprint(dict(
@@ -215,6 +218,7 @@ class CalibratedDAGAgentSearch(DAGAgentSearch):
             proposal_candidate_ids=prioritized)
 
     def execute_planning_measurements(self, parent, candidate_ids, action_ids):
+        self.synchronize_cost_revision()
         self._dag_current_proposal_ids = set(candidate_ids)
         selected = set(candidate_ids)
         pending = [
@@ -226,11 +230,21 @@ class CalibratedDAGAgentSearch(DAGAgentSearch):
             identifier for row in pending for identifier in row['trial_ids']
         }
         for trial in self.store.trials():
-            if (trial['trial_id'] in pending_trial_ids
-                    and not trial.get('failure')
-                    and trial.get('measurement') is None
-                    and (trial.get('prediction') or {}).get(
-                        'memory', {}).get('admission') != 'REJECT_OOM'):
+            if (trial['trial_id'] not in pending_trial_ids
+                    or trial.get('failure')
+                    or trial.get('measurement') is not None
+                    or trial.get('prediction') is None
+                    or trial['prediction']['memory'].get(
+                        'admission') == 'REJECT_OOM'):
+                continue
+            if (trial['prediction'].get('cost_database_revision')
+                    != self.cost_revision):
+                if (self.store.usage().get('cpu_predictions', 0)
+                        >= self.config.budget.max_cpu_predictions):
+                    continue
+                trial = self.predict_trial(trial, force=True)
+            if trial['prediction']['memory'].get(
+                    'admission') != 'REJECT_OOM':
                 selected.add(trial['trial_id'])
         return super().execute_planning_measurements(
             parent, selected, action_ids)
