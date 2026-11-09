@@ -9,6 +9,7 @@ on:
       - 'paramorph/search/**'
       - 'paramorph/experiments/run_dag_agent_search.py'
       - 'paramorph/experiments/run_system_search.py'
+      - 'paramorph/requirements.txt'
       - '.github/workflows/parameld-agent-checks.yml'
 
 jobs:
@@ -25,5 +26,7 @@ jobs:
         run: python -m compileall -q paramorph/search paramorph/experiments
       - name: Verify real module imports and Agent schemas
         working-directory: paramorph
+        env:
+          PYTHONPATH: ../integration
         run: |
           python -c 'from search.native_calibration_search import CalibratedDAGAgentSearch; from search.agent_decision_protocol import EvidencedDAGReview, EvidencedExperimentDecision; from search.system_search import EvidenceGuidedSearch; assert issubclass(CalibratedDAGAgentSearch, EvidenceGuidedSearch); assert "candidate_verifications" in EvidencedDAGReview.model_fields; assert "stop_reason" in EvidencedExperimentDecision.model_fields'
