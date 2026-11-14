@@ -2,7 +2,7 @@ from copy import deepcopy
 from itertools import accumulate, product, groupby
 import json
 import time
-from typing import Literal
+from typing import Annotated, ClassVar, Literal
 
 from pydantic import Field, StrictBool, StrictInt, create_model, model_validator
 
@@ -31,6 +31,9 @@ from search.planning_portfolio import PortfolioControl
 from search.seed_planner import SeedPlanner
 from validation.parallel_validator import validate_candidate
 from scheduling.native_microbatches import valid_microbatch_group
+
+
+PlanningIdentifier = Annotated[str, Field(min_length=1, max_length=256)]
 
 
 class ParallelInvestigationRanges(Contract):
@@ -103,20 +106,20 @@ class FullPartitionSeed(Contract):
     decoder_chunks: list[StrictInt] = Field(min_length=1)
 
 class PlanningInvestigation(Contract):
-    parent_trial_id: str
+    parent_trial_id: PlanningIdentifier
     module_scope: Literal['all', 'selected'] = Field(description='all开放全部模块边界，movable_module_ids必须为[]；selected只开放列表中的模块')
     movable_module_ids: list[StrictInt] = Field(description='module_scope为all时必须为[]，selected时填写互不重复的真实模块编号且不能为空')
     parallel_ranges: ParallelInvestigationRanges
     runtime_ranges: RuntimeInvestigationRanges = Field(default_factory=RuntimeInvestigationRanges)
     partition_seeds: list[FullPartitionSeed] = Field(default_factory=list, max_length=2,
         description='可以直接生成至多两项完整非均匀布局；没有具体布局时使用[]；种子参与评价并可继续数值重构')
-    preselected_candidate_ids: list[str] = Field(default_factory=list, max_length=8,
+    preselected_candidate_ids: list[PlanningIdentifier] = Field(default_factory=list, max_length=8,
         description='引用本轮已完成DAG评价且属于调查范围的候选。提出目录外的新配置族时使用空列表。')
     budget: InvestigationBudget
     hypothesis: str = Field(min_length=1,max_length=180)
     expected_execution_change: str = Field(min_length=1,max_length=180)
-    possible_side_effects: list[str]
-    evidence_refs: list[str] = Field(min_length=1)
+    possible_side_effects: list[Annotated[str, Field(min_length=1,max_length=180)]] = Field(max_length=32)
+    evidence_refs: list[PlanningIdentifier] = Field(min_length=1,max_length=24)
     graph_intent: GraphGuidedIntent | None = None
 
     @model_validator(mode='after')
@@ -142,11 +145,11 @@ class PlanningQuery(Contract):
         'inspect_task_dependencies', 'inspect_memory', 'inspect_communication_flow',
         'inspect_rank_topology', 'inspect_placement_options', 'query_affected_decisions', 'get_budget_status', 'get_trial_history',
         'compare_candidate_graph_delta']
-    candidate_ids: list[str] = Field(default_factory=list, max_length=2)
+    candidate_ids: list[PlanningIdentifier] = Field(default_factory=list, max_length=2)
     offset: int = Field(default=0, ge=0)
     limit: int = Field(default=4, ge=1, le=8)
     region_id: int | None = Field(default=None, ge=0)
-    task_ids: list[str] = Field(default_factory=list, max_length=8)
+    task_ids: list[PlanningIdentifier] = Field(default_factory=list, max_length=8)
     dependency_depth: int = Field(default=1, ge=1, le=3)
     dependency_direction: Literal['predecessors', 'successors', 'both'] = 'both'
     target_geometry: PlacementGeometry | None = None
@@ -154,8 +157,8 @@ class PlanningQuery(Contract):
 
 class PlanningInvestigationBatch(Contract):
     actions: list[PlanningInvestigation] = Field(default_factory=list, max_length=4)
-    evidence_refs: list[str] = Field(default_factory=list)
-    reason: str
+    evidence_refs: list[PlanningIdentifier] = Field(default_factory=list,max_length=24)
+    reason: str = Field(min_length=1,max_length=600)
     tool_requests: list[PlanningQuery] = Field(default_factory=list, max_length=4)
 
     @property
@@ -201,14 +204,43 @@ class InvestigationControl(PortfolioControl):
         task_ids = tuple(dict.fromkeys(row['task_id'] for row in self._planning_graph_impact['tasks']))
         if not task_ids:
             raise ValueError('联合策略缺少可引用的当前 DAG 任务')
+        world = self.topology.num_gpus
+        divisors = [value for value in range(1,world+1) if world%value==0]
+        parallel_fields = {}
+        for name in ParallelInvestigationRanges.model_fields:
+            values = tuple(dict.fromkeys(self.domains.get(name,divisors)))
+            if not values:
+                raise ValueError(f'{name}没有可执行的原生取值')
+            parallel_fields[name] = (list[Literal[values]] | None,
+                Field(default=None,min_length=1,max_length=len(values)))
+        parallel = create_model('ScopedParallelInvestigationRanges',__base__=ParallelInvestigationRanges,**parallel_fields)
         intent = create_model('ScopedGraphGuidedIntent', __base__=GraphGuidedIntent,
+            source_impact_id=(Literal[self._planning_graph_impact['impact_id']],...),
             target_task_ids=(list[Literal[task_ids]], Field(min_length=1, max_length=min(24, len(task_ids)))),
-            affected_regions=(list[StrictInt], Field(default_factory=list, max_length=0)),
-            target_resources=(list[str], Field(default_factory=list, max_length=0)))
+            affected_regions=(ClassVar[tuple],()),
+            target_resources=(ClassVar[tuple],()),
+            evidence_refs=(list[PlanningIdentifier],Field(min_length=1,max_length=24)))
+        runtime_fields = dict(rank_mapping=(None,None),
+            rank_mapping_ids=(list[Annotated[str,Field(pattern='^axis-[a-f0-9]{20}$')]] | None,
+                Field(default=None,min_length=1,max_length=24)))
+        parent_batch = self.config.request['global_batch']
+        micro = self.domains.get('micro_batch',self.domains.get('micro_batch_size',
+            [value for value in range(1,parent_batch+1) if parent_batch%value==0]))
+        for name,allowed in dict(micro_batch=micro,group=self.domains.get('group',list(range(1,parent_batch+1))),
+                overlap_p2p=[False,True],overlap_grad_reduce=[False,True],overlap_param_gather=[False,True],
+                recompute=['none','full','selective-mlp','selective'],optimizer_sharding=['distributed','replicated'],
+                execution_backend=self.config.request.get('allowed_execution_backends',['megatron_ddp'])).items():
+            values = tuple(dict.fromkeys(allowed))
+            runtime_fields[name] = (list[Literal[values]] | None,
+                Field(default=None,min_length=1,max_length=len(values)))
         runtime = create_model('ScopedRuntimeInvestigationRanges', __base__=RuntimeInvestigationRanges,
-            rank_mapping=(None, None))
+            **runtime_fields)
+        partition = create_model('ScopedFullPartitionSeed',__base__=FullPartitionSeed,
+            decoder_chunks=(list[StrictInt],Field(min_length=1,max_length=self.model.num_layers)))
         action = create_model('ScopedPlanningInvestigation', __base__=PlanningInvestigation,
-            graph_intent=(intent, ...), runtime_ranges=(runtime, ...))
+            graph_intent=(intent, ...), runtime_ranges=(runtime, ...),parallel_ranges=(parallel,...),
+            movable_module_ids=(list[StrictInt],Field(max_length=self.model.num_layers)),
+            partition_seeds=(list[partition],Field(default_factory=list,max_length=2)))
         return create_model('ScopedPlanningInvestigationBatch', __base__=schema,
             actions=(list[action], Field(default_factory=list, max_length=4)))
 

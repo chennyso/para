@@ -22,6 +22,12 @@ LIMIT = 512*1024
 LEASE = None
 
 
+class AgentResponseFailure(RuntimeError):
+    def __init__(self,receipt):
+        self.receipt = receipt
+        super().__init__(receipt['detail'])
+
+
 def encoded(value):
     return json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=False)
 
@@ -67,8 +73,10 @@ def wait_for(request):
     while True:
         if response_path.is_file():
             response = json.loads(response_path.read_text())
-            if response['id'] != request['id'] or 'error' in response:
-                raise RuntimeError(response.get('detail','实际Agent响应身份不一致'))
+            if response['id'] != request['id']:
+                raise ValueError('实际Agent响应身份不一致')
+            if 'error' in response:
+                raise AgentResponseFailure(response)
             return response
         if cancelled_path.is_file():
             raise RuntimeError('当前Agent请求的控制器归属已经终止')
@@ -96,6 +104,8 @@ def infer(executable,request):
     directory = Path(ARTIFACT_DIRECTORY)/'agent-api-progress'
     directory.mkdir(parents=True,exist_ok=True)
     path = directory/(request['id']+'.json')
+    stream_path = directory/(request['id']+'.agent-message.jsonl')
+    messages = {}
     progress = dict(request_id=request['id'],role=request['role'],model=request['model'],status='INITIALIZING')
     atomic_write(path,progress)
     settings_path = Path(os.environ.get('CODEX_HOME',str(Path.home()/'.codex')))/'config.toml'
@@ -124,6 +134,15 @@ def infer(executable,request):
                 raise RuntimeError('实际Agent API在交付完整响应前退出')
             message = json.loads(line)
             method = message.get('method')
+            if method=='item/agentMessage/delta':
+                params = message['params']
+                delta = params['delta']
+                identifier = params['itemId']
+                messages.setdefault(identifier,[]).append(delta)
+                progress['output_characters'] = progress.get('output_characters',0)+len(delta)
+                progress['last_output_tail'] = delta[-256:]
+                with stream_path.open('a') as stream:
+                    stream.write(encoded(dict(item_id=identifier,delta=delta))+'\n')
             if method=='thread/tokenUsage/updated':
                 progress['token_usage'] = message['params']['tokenUsage']['total']
             if method in ('turn/completed','thread/tokenUsage/updated') or time.monotonic()-progress.get('last_write',started) >= 10:
@@ -161,7 +180,8 @@ def infer(executable,request):
                 effort=request['effort'],cwd='/dev',approvalPolicy='never',
                 input=[dict(type='text',text=request['prompt'])],outputSchema=request['schema'])))
             turn_id = reply(3)['turn']['id']
-            progress.update(status='TURN_RUNNING',turn_id=turn_id,observed_unix_seconds=time.time())
+            progress.update(status='TURN_RUNNING',thread_id=thread['id'],turn_id=turn_id,
+                api_process_pid=process.pid,observed_unix_seconds=time.time())
             atomic_write(path,progress)
             response,usage = None,None
             while True:
@@ -179,12 +199,21 @@ def infer(executable,request):
                     usage = params['tokenUsage']['total']
                 elif method=='turn/completed':
                     turn = params['turn']
+                    actual_usage = None if usage is None else dict(input_tokens=usage['inputTokens'],
+                        output_tokens=usage['outputTokens'],cached_input_tokens=usage['cachedInputTokens'])
                     if turn['status']!='completed' or response is None or usage is None:
                         detail = turn.get('error') or {}
-                        raise RuntimeError(str(detail.get('message','实际Agent没有交付完整结果与用量'))[:350])
+                        receipt = dict(id=request['id'],error='AgentResponseFailure',
+                            detail=str(detail.get('message','实际Agent没有交付完整结果与用量'))[:350],
+                            error_details=detail,
+                            status=turn['status'],usage=actual_usage,token_usage_complete=usage is not None,
+                            turn_id=turn_id,model=request['model'],ephemeral=True,
+                            incomplete_output={key:''.join(parts) for key,parts in messages.items()},
+                            elapsed_seconds=time.monotonic()-started)
+                        atomic_write(directory/(request['id']+'.failed-receipt.json'),receipt)
+                        raise AgentResponseFailure(receipt)
                     return dict(id=request['id'],response=json.loads(response),
-                        usage=dict(input_tokens=usage['inputTokens'],output_tokens=usage['outputTokens'],
-                            cached_input_tokens=usage['cachedInputTokens']),model=request['model'],
+                        usage=actual_usage,model=request['model'],
                         turn_id=turn_id,ephemeral=True,elapsed_seconds=time.monotonic()-started)
         finally:
             if process.poll() is None:
@@ -204,6 +233,9 @@ def relay(executable):
             continue
         try:
             response = infer(executable,request)
+        except AgentResponseFailure as error:
+            command('push',data=encoded(error.receipt))
+            raise
         except (ValueError,RuntimeError,queue.Empty) as error:
             response = dict(id=request['id'],error=type(error).__name__,detail=str(error)[:350])
             command('push',data=encoded(response))

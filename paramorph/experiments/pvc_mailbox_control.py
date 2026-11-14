@@ -21,7 +21,7 @@ def main():
         request = (pvc_transport.pull() if (args.mailbox/'ownership-protocol.json').is_file() else None)
         print(pvc_transport.encoded(request),flush=True)
     else:
-        pvc_transport.push(json.loads(sys.stdin.read(pvc_transport.LIMIT+1)))
+        pvc_transport.push(json.loads(sys.stdin.read()))
 
 
 if __name__=='__main__':

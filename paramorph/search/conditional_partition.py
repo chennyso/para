@@ -82,7 +82,18 @@ class ConditionalPartitionSolver:
         self.profile_cache = {}
         self.environment_match_cache = {}
         self.annotated_profile_cache = {}
+        self.compute_profile_index = {}
+        for profile in self.profiles:
+            normalized = normalized_execution(profile['request'])
+            normalized['precision_aware_optimizer'] = bool(normalized['precision_aware_optimizer'])
+            identity = self._compute_identity(normalized)
+            self.compute_profile_index.setdefault(identity,[]).append(profile)
         self.boundary_index = boundary_index
+
+    @staticmethod
+    def _compute_identity(execution):
+        return fingerprint({key:execution.get(key) for key in COMPUTE_FIELDS
+            if key not in ('backend_fingerprint','hardware_fingerprint')})
 
     def _environment_matches(self, profile):
         # 求解器固定使用当前成本记录与源码身份，环境校验按记录复用。
@@ -124,12 +135,8 @@ class ConditionalPartitionSolver:
             state_dtypes={key: request.get(key) for key in STATE_DTYPE_FIELDS}, include_state=include_state))
         if cache_key in self.profile_cache:
             return self.profile_cache[cache_key]
-        def comparable(row):
-            previous = normalized_execution(row['request'])
-            previous['precision_aware_optimizer'] = bool(previous['precision_aware_optimizer'])
-            return all(previous.get(key) == target.get(key) for key in COMPUTE_FIELDS
-                if key not in ('backend_fingerprint', 'hardware_fingerprint'))
-        matched = [row for row in self.profiles if comparable(row) and self._environment_matches(row)
+        comparable = self.compute_profile_index.get(self._compute_identity(target),())
+        matched = [row for row in comparable if self._environment_matches(row)
             and backend_reuse_evidence(request, row)['status'] != 'MISMATCHED']
         matched = [row for row in matched if set(map(int, row['layers']))
             == set(range(self.rewriter.model.num_layers))]

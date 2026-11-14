@@ -5,10 +5,13 @@ from predictor.profile_database import effective_execution_config
 
 
 class GraphGuidedIntent(Contract):
+    source_impact_id: str | None = Field(default=None,min_length=1,max_length=256,
+        description='当前父策略DAG影响分析的完整身份，由当前Schema绑定')
     target_task_ids: list[str] = Field(min_length=1, max_length=24)
     affected_regions: list[StrictInt] = Field(default_factory=list, max_length=32)
     target_resources: list[str] = Field(default_factory=list, max_length=24)
-    movable_boundaries: list[StrictInt] = Field(default_factory=list, max_length=32)
+    movable_boundaries: list[StrictInt] = Field(default_factory=list, max_length=32,
+        description='当前DAG中虚拟阶段槽位之间的边界索引，取值从1至PP乘VPP减1；交由完整分区搜索时使用空列表')
     evidence_refs: list[str] = Field(min_length=1)
     expected_effects: str = Field(min_length=1,max_length=180)
 
@@ -18,7 +21,9 @@ class GraphActionCompiler:
         self.impact = impact
 
     def compile(self, intent, reference, shape, parallel_ranges, runtime_ranges):
-        if self.impact['impact_id'] not in intent.evidence_refs:
+        if intent.source_impact_id is not None and intent.source_impact_id!=self.impact['impact_id']:
+            raise ValueError('联合意图的DAG影响分析身份与当前父策略不一致')
+        if intent.source_impact_id!=self.impact['impact_id'] and self.impact['impact_id'] not in intent.evidence_refs:
             raise ValueError('联合意图必须引用当前任务影响分析')
         known = {row['task_id']: row for row in self.impact['tasks']}
         unknown = sorted(set(intent.target_task_ids) - known.keys())

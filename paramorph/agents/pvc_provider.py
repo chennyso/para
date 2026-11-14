@@ -5,6 +5,7 @@ import time
 
 from openai.lib._pydantic import to_strict_json_schema
 from agents.pvc_mailbox import OwnedMailbox
+from agents.pvc_transport import AgentResponseFailure
 
 
 class PVCStructuredProvider:
@@ -60,6 +61,11 @@ class PVCStructuredProvider:
         started = time.monotonic()
         try:
             receipt = self.bridge.wait_for(request)
+        except AgentResponseFailure as error:
+            (directory/'failed-receipt.json').write_text(json.dumps(error.receipt,ensure_ascii=False,indent=2)+'\n')
+            if error.receipt.get('usage') is not None:
+                on_usage(request['id'],error.receipt['usage'])
+            raise
         finally:
             on_finish(request['id'],time.monotonic()-started)
         on_usage(request['id'],receipt['usage'])
