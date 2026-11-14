@@ -81,6 +81,7 @@ class ConditionalPartitionSolver:
         self.fair_expansion = fair_expansion
         self.profile_cache = {}
         self.environment_match_cache = {}
+        self.annotated_profile_cache = {}
         self.boundary_index = boundary_index
 
     def _environment_matches(self, profile):
@@ -135,7 +136,10 @@ class ConditionalPartitionSolver:
         if not matched:
             self.profile_cache[cache_key] = None
             return None
-        matched = [annotate_measurement_semantics(item) for item in matched]
+        for item in matched:
+            if id(item) not in self.annotated_profile_cache:
+                self.annotated_profile_cache[id(item)] = annotate_measurement_semantics(item)
+        matched = [self.annotated_profile_cache[id(item)] for item in matched]
         row = max(matched, key=lambda item: (
             same_training_plan(item['request'], request),
             *compute_profile_quality(item),
