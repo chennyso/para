@@ -80,9 +80,17 @@ class ConditionalPartitionSolver:
             raise ValueError('状态扩展配额开关必须为布尔值')
         self.fair_expansion = fair_expansion
         self.profile_cache = {}
+        self.environment_match_cache = {}
         self.boundary_index = boundary_index
 
     def _environment_matches(self, profile):
+        # 求解器固定使用当前成本记录与源码身份，环境校验按记录复用。
+        identity = id(profile)
+        if identity not in self.environment_match_cache:
+            self.environment_match_cache[identity] = self._validate_environment(profile)
+        return self.environment_match_cache[identity]
+
+    def _validate_environment(self, profile):
         topology = self.rewriter.topology
         if not topology.devices or not topology.software or not profile.get('hardware'):
             return False
@@ -120,7 +128,7 @@ class ConditionalPartitionSolver:
             previous['precision_aware_optimizer'] = bool(previous['precision_aware_optimizer'])
             return all(previous.get(key) == target.get(key) for key in COMPUTE_FIELDS
                 if key not in ('backend_fingerprint', 'hardware_fingerprint'))
-        matched = [row for row in self.profiles if self._environment_matches(row) and comparable(row)
+        matched = [row for row in self.profiles if comparable(row) and self._environment_matches(row)
             and backend_reuse_evidence(request, row)['status'] != 'MISMATCHED']
         matched = [row for row in matched if set(map(int, row['layers']))
             == set(range(self.rewriter.model.num_layers))]
