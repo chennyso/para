@@ -14,6 +14,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--workspace',type=Path,required=True)
     parser.add_argument('--ready-file',type=Path,required=True)
+    parser.add_argument('--gpu-boundary-only',action='store_true')
     args = parser.parse_args()
     root = args.workspace.resolve()
     assert not args.ready_file.exists()
@@ -29,7 +30,8 @@ def main():
             assert len(children)==1
             child = children[0]
             wait = Path(f'/proc/{child.pid}/wchan').read_text().strip()
-            if not child.children(recursive=True) and wait in ('locks_lock_inode_wait','hrtimer_nanosleep'):
+            eligible_wait = wait=='locks_lock_inode_wait' or (not args.gpu_boundary_only and wait=='hrtimer_nanosleep')
+            if not child.children(recursive=True) and eligible_wait:
                 parent.suspend()
                 child.suspend()
                 if not child.children(recursive=True):

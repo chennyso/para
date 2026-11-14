@@ -4260,7 +4260,7 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
         if role == 'JointStrategyAgent' and self.config.agent_ablation == 'without_joint_search':
             instructions += '\n每个候选只改变一个独立调节轴，其余只允许后端强制补全。'
         instructions += '\n' + policy.instructions
-        visible = self.visible_observation(observation)
+        visible = self.visible_observation(self.with_formal_measurement_gate(observation))
         if self.config.agent_request_profile == 'decision' and not pricing_policy:
             from agents.context_budget import role_observation
             visible = role_observation(role, visible)
@@ -4514,6 +4514,7 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
             schema=schema.model_json_schema()))
 
     def agent_context(self, observation, role=None):
+        observation = self.with_formal_measurement_gate(observation)
         if role == 'ConstraintValidationAgent' and 'candidate_review_catalog' in observation:
             return dict(observation, available_tools=[])
         tools = (list(ConstraintValidationToolRequest.model_json_schema()['properties']['tool']['enum'])
@@ -6984,6 +6985,19 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
     def planning_leader_rate(self):
         return max((rate for row in self.store.trials()
             if (rate := valid_throughput(row)) is not None), default=None)
+
+    def formal_measurement_gate(self, parent=None):
+        return dict(leader_tokens_per_second=self.planning_leader_rate(),
+            parent_measured_tokens_per_second=(parent.get('measurement') or {}).get('tokens_per_second')
+                if parent is not None else None,
+            required_comparison='完整DAG预测吞吐严格超过相同负载最佳正式实测',
+            required_evidence=['原生Validation', '当前成本版本的完整DAG', '每张GPU的显存准入'],
+            calibration_scope='校准与显存补测分别记录，正式实测独立计数')
+
+    def with_formal_measurement_gate(self, observation):
+        parent_id = observation.get('parent_trial_id')
+        parent = self.store.trial(parent_id) if parent_id is not None else None
+        return dict(observation, formal_measurement_gate=self.formal_measurement_gate(parent))
 
     def planning_decision_conflict(self, role, tool_name, response_id, issues):
         tool = dict(tool=tool_name)

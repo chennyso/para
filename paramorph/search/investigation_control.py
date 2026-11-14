@@ -1019,6 +1019,7 @@ class InvestigationControl(PortfolioControl):
             'sequence', 'global_batch', 'recompute', 'pipeline_schedule', 'overlap_p2p', 'rank_mapping')},
             model_module_types=[kind.value for kind in self.model.layer_types], source_costs=source,
             parent_memory_policy=request.get('memory_policy'),
+            formal_measurement_gate=self.formal_measurement_gate(parent),
             native_recomputation_options=dict(modes=['none', 'full', 'selective-mlp', 'selective'],
                 supported_modules=selective_modules(self.model),
                 selective_policy=dict(recompute_granularity='selective',
