@@ -31,7 +31,7 @@ EXECUTION_FIELDS += ('execution_backend', 'fsdp_sharding_strategy', 'dense_shard
 EXECUTION_FIELDS += ('pipeline_dtype', 'sequence_parallel', 'clip_grad')
 EXECUTION_FIELDS += ('main_grads_dtype', 'main_params_dtype', 'exp_avg_dtype', 'exp_avg_sq_dtype')
 EXECUTION_FIELDS += DDP_OVERLAP_FIELDS
-PROFILE_SIGNATURE_REVISION = 'native_backend_effective_execution_v6'
+PROFILE_SIGNATURE_REVISION = 'native_backend_effective_execution_v7'
 
 
 def resolved_cuda_connections(request):
@@ -81,6 +81,15 @@ def normalized_execution(request):
         resolved['memory_policy'] = asdict(MemoryPolicy(**request['memory_policy']))
         for field in ('activation_offload_modules', 'recompute_modules'):
             resolved['memory_policy'][field] = list(resolved['memory_policy'][field])
+        default_full = asdict(MemoryPolicy(recompute_granularity='full', reuse_activation_slots=False))
+        for field in ('activation_offload_modules', 'recompute_modules'):
+            default_full[field] = list(default_full[field])
+        if (request.get('execution_backend', 'megatron_ddp') == 'megatron_ddp'
+                and request['recompute'] == 'full' and not request.get('offload', False)
+                and not request.get('optimizer_offload_fraction', 0)
+                and not request.get('activation_cpu_offload_layers', 0)
+                and resolved['memory_policy'] == default_full):
+            resolved['memory_policy'] = None
     resolved['optimizer'] = request.get('optimizer', 'adam')
     resolved['clip_grad'] = resolved_clip_grad(request)
     resolved['bucket_elements'] = resolved_bucket_elements(request)
