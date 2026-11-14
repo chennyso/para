@@ -14,6 +14,8 @@ from graph.capability_registry import tensor_parallel_limit, validate_attention_
 from graph.process_groups import process_groups
 from predictor.physical_paths import communication_resources
 from predictor.profile_database import plan_signature
+from scheduling.native_microbatches import native_schedule_settings
+from search.conditional_partition import REWRITE_FIELDS
 
 
 class CompleteAndRewrite:
@@ -34,6 +36,7 @@ class CompleteAndRewrite:
 
     def candidate(self, request, parent_id=None):
         resolve_ddp_overlap(request)
+        native_schedule_settings(request)
         attention = request.get('attention_backend_capabilities', self.registry.attention_capabilities)
         validate_attention_capability(dict(request, attention_backend_capabilities=attention),
             self.registry.model_config, self.topology)
@@ -157,19 +160,14 @@ class CompleteAndRewrite:
             execution_backend=parent_request.get('execution_backend', 'megatron_ddp'),
             rank_mapping=parent_request.get('rank_mapping', list(range(self.topology.num_gpus))))
         dimensions = ('tp', 'pp', 'cp', 'ep', 'etp', 'expert_dp', 'dp', 'vpp', 'micro_batch', 'group')
-        allowed_fields = set(dimensions) | {'decoder_chunks', 'recompute', 'bucket_elements', 'overlap_p2p',
-            'rank_mapping', 'pipeline_schedule', 'optimizer_sharding', 'precision_aware_optimizer',
-            'offload', 'optimizer_offload_fraction', 'optimizer_transfer_overlap', 'optimizer_pin_cpu_params', 'memory_policy',
-            'execution_backend', 'megatron_fsdp_version', 'fsdp_sharding_strategy', 'dense_sharding_strategy',
-            'expert_sharding_strategy', 'dp_inner_size', 'dp_outer_size', 'outer_sharding_strategy',
-            'expert_dp_inner_size', 'expert_dp_outer_size', 'expert_outer_sharding_strategy',
-            'fsdp_unit', 'fsdp_prefetch', 'fsdp_prefetch_distance', 'fsdp_reshard_after_forward',
-            'fsdp_double_buffer', 'fsdp_bucket_elements',
-            'megatron_fsdp_main_params_dtype', 'megatron_fsdp_main_grads_dtype'}
-        if (set(intent.values) | set(intent.adjustable) | set(intent.preserve)) - allowed_fields:
-            raise ValueError('变换意图包含未注册的变量')
-        if set(intent.allowed_ranges) - allowed_fields:
-            raise ValueError('意图的允许范围包含未注册变量')
+        allowed_fields = set(REWRITE_FIELDS)
+        unsupported = (set(intent.values) | set(intent.adjustable) | set(intent.preserve)
+            | set(intent.allowed_ranges)) - allowed_fields
+        if unsupported:
+            raise ValueError(dict(status='CONSTRAINT_CONFLICT', conflicts=sorted(unsupported),
+                reason='变换意图包含未注册变量'))
+        if 'batch_p2p_comm' in intent.preserve:
+            parent_request.setdefault('batch_p2p_comm', not parent_request.get('overlap_p2p', False))
         for name, domain in intent.allowed_ranges.items():
             if not domain:
                 raise ValueError(dict(status='CONSTRAINT_CONFLICT', conflicts=[f'{name}的意图允许范围为空']))
@@ -278,6 +276,7 @@ class CompleteAndRewrite:
             range_conflict = False
             for key in set(intent.allowed_ranges) - set(dimensions) - {'decoder_chunks', 'pipeline_schedule'}:
                 defaults = dict(rank_mapping=list(range(world)), optimizer_sharding='distributed', overlap_p2p=False,
+                    batch_p2p_comm=not request.get('overlap_p2p', False),
                     precision_aware_optimizer=False, execution_backend='megatron_ddp',
                     fsdp_sharding_strategy='no_shard', dense_sharding_strategy='no_shard',
                     expert_sharding_strategy='no_shard',
@@ -353,6 +352,18 @@ class CompleteAndRewrite:
                 continue
             if config.vpp == 1 and 'overlap_p2p' not in intent.values and 'overlap_p2p' not in intent.preserve:
                 request['overlap_p2p'] = False
+            if request.get('overlap_p2p', False) != parent_request.get('overlap_p2p', False):
+                if 'batch_p2p_comm' not in intent.values and 'batch_p2p_comm' not in intent.preserve:
+                    if 'batch_p2p_comm' not in intent.allowed_ranges:
+                        request.pop('batch_p2p_comm', None)
+                    else:
+                        batch_options = intent.allowed_ranges['batch_p2p_comm']
+                        default_batch = not request.get('overlap_p2p', False)
+                        request['batch_p2p_comm'] = default_batch if default_batch in batch_options else batch_options[0]
+                if not request.get('overlap_p2p', False):
+                    request.pop('overlap_p2p_comm_warmup_flush', None)
+            if 'batch_p2p_comm' in intent.values or 'batch_p2p_comm' in intent.allowed_ranges:
+                request['record_native_schedule'] = True
             if request.get('optimizer_sharding', 'distributed') not in ('distributed', 'replicated', 'fsdp'):
                 conflicts.append('Optimizer Sharding缺少原生执行接口')
                 continue

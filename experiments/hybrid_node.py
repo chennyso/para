@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 import psutil
+from host_memory_admission import host_memory_snapshot
 
 
 def write_exit(path, record):
@@ -34,7 +35,7 @@ def nccl_environment(request, ib):
     workers, devices_per_worker = launch_geometry(request)
     single_node = workers == 1
     environment = dict(CUDA_DEVICE_MAX_CONNECTIONS=str(connections),
-        NCCL_P2P_DISABLE='1', NCCL_IB_DISABLE='1' if single_node else '0',
+        NCCL_P2P_DISABLE='1', NCCL_SHM_DISABLE='0', NCCL_IB_DISABLE='1' if single_node else '0',
         NCCL_SOCKET_IFNAME='lo' if single_node else 'net1',
         NCCL_IB_GID_INDEX='0', NCCL_IB_TC='136', NCCL_IB_QPS_PER_CONNECTION='4', NCCL_NET_GDR_LEVEL='5',
         NCCL_MIN_NCHANNELS='4', NCCL_IB_HCA=ib, CUDA_DEVICE_ORDER='PCI_BUS_ID')
@@ -112,6 +113,7 @@ def main():
             for row in csv.reader(processes.stdout.splitlines(), skipinitialspace=True)]
         _, expected = launch_geometry(json.loads((output / 'request.json').read_text()))
         state = dict(node=args.node, gpu_count=len(rows), devices=rows, compute_processes=apps,
+            host_memory=host_memory_snapshot(),
             idle_memory_limit_mib=1024, checked_at_unix_seconds=time.time())
         (output / f'node{args.node}.cuda-preflight.json').write_text(json.dumps(state, indent=2) + '\n')
         if len(rows) != expected or len({row['uuid'] for row in rows}) != expected:
@@ -210,7 +212,7 @@ def main():
     if request.get('paramorph_numerical_reference', False):
         environment['NVTE_ALLOW_NONDETERMINISTIC_ALGO'] = '0'
         environment['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
-    command = ['/workspace/runs/downloaded-model-tests-20261005/env/bin/python', '-m', 'torch.distributed.run',
+    command = [os.environ.get('PARAMELD_TRAINING_PYTHON', '/workspace/runs/downloaded-model-tests-20261005/env/bin/python'), '-m', 'torch.distributed.run',
         f'--nnodes={worker_count}', f'--nproc-per-node={devices_per_worker}', f'--node_rank={args.node}', f'--master_addr={args.master}',
         f'--master_port={request["port"]}', '--rdzv_backend=static', str(output / 'code/hybrid_training_entry.py'),
         '--model', request['model'], '--checkpoint', request['checkpoint'], '--data', request['data'],
@@ -223,6 +225,8 @@ def main():
         command.append('--cpu-offload')
     if request.get('load_hf_weights', False):
         command.append('--load-hf-weights')
+    if request.get('initialization') == 'random':
+        command.append('--from-scratch')
     if request.get('hf_fused_mamba_norm', False):
         command.append('--hf-fused-mamba-norm')
     if request.get('diagnose', False):
@@ -283,8 +287,13 @@ def main():
     if request.get('nccl_profile', False) and (
             request.get('nccl_rank_groups') or request.get('nccl_payloads_bytes')):
         command.extend(['--rank-groups-json', str(output / 'request.json')])
+    if worker_count==1 and not request.get('communication_test',False):
+        assert args.node==0 and command[2]=='torch.distributed.run'
+        entry=command.index('--rdzv_backend=static')+1
+        command=[*command[:3],'--standalone',f'--nproc-per-node={devices_per_worker}',*command[entry:]]
     with (cache / 'training.lock').open('a') as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        memory_events_before = host_memory_snapshot()['events']
         process = subprocess.Popen(command, env=environment)
         pid_path.write_text(str(process.pid))
         timed_out = False
@@ -342,7 +351,8 @@ def main():
         code = -15 if timed_out or host_memory_failure else process.wait()
     write_exit(exit_path, {'status': 'complete' if code == 0 else 'failed', 'returncode': code,
         'host_memory': host_memory_failure, 'host_memory_peak_observed_bytes': memory_peak,
-        'host_memory_working_set_peak_bytes': working_set_peak, 'execution_deadline_reached': timed_out})
+        'host_memory_working_set_peak_bytes': working_set_peak, 'execution_deadline_reached': timed_out,
+        'cgroup_memory_events_before': memory_events_before, 'cgroup_memory_events_after': host_memory_snapshot()['events']})
 
 
 if __name__ == '__main__':

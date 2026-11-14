@@ -2,6 +2,7 @@ from copy import deepcopy
 from itertools import permutations
 import math
 
+from contracts import fingerprint
 from graph.process_groups import process_groups
 from predictor.profile_database import plan_signature
 
@@ -40,8 +41,24 @@ def placement_families(request):
         candidate['rank_mapping'] = axis_placement(request, order)
         key = plan_signature(candidate)
         if key not in candidates:
-            candidates[key] = dict(request=candidate, axis_order=list(order))
+            geometry = {axis: request[axis] for axis in AXES}
+            identity = fingerprint(dict(geometry=geometry, world=len(candidate['rank_mapping']),
+                rank_mapping=candidate['rank_mapping']))[:20]
+            candidates[key] = dict(request=candidate, axis_order=list(order), mapping_id='axis-' + identity)
     return list(candidates.values())
+
+
+def placement_catalog(request, devices):
+    per_node = request['gpus_per_node']
+    nodes = {row['physical_rank']: row['node_index'] for row in devices}
+    options = []
+    for family in placement_families(request):
+        groups = process_groups(family['request'])['physical']
+        crossings = {name: sum(len({nodes.get(rank, rank // per_node) for rank in group}) > 1
+            for group in groups[name]) for name in ('tp', 'cp', 'dp', 'pp', 'expert_dp')}
+        options.append(dict(mapping_id=family['mapping_id'], axis_order=family['axis_order'],
+            rank_mapping=family['request']['rank_mapping'], cross_node_group_counts=crossings))
+    return options
 
 
 def shared_block_rank_mappings(request, limit):

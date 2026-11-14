@@ -21,6 +21,7 @@ exits = [json.loads((root / f'node{node}.exit.json').read_text()) for node in ra
 codes = [row['returncode'] for row in exits]
 files = {}
 for pattern in ('rank*.manifest.json', 'rank*.measurements.json', 'node*.log',
+        'rank*.checkpoint-read.jsonl', 'rank*.numerical-failure.jsonl',
         'node*.cuda-preflight.json', 'node*.exit.json', 'node*.host-memory.json'):
     for path in root.glob(pattern):
         files[path.name] = path.read_text()

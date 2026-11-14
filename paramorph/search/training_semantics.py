@@ -4,7 +4,8 @@ from predictor.profile_database import resolved_clip_grad
 def require_fixed_training_semantics(parent_request, candidate_request):
     fields = ('model', 'checkpoint', 'data', 'global_batch', 'sequence', 'precision', 'optimizer',
         'node_count', 'gpus_per_node', 'random_seed', 'loss_normalization', 'optimizer_config',
-        'optimizer_hyperparameters', 'optimizer_schedule', 'native_uniform_pipeline_layout', 'training_data_contract')
+        'optimizer_hyperparameters', 'optimizer_schedule', 'native_uniform_pipeline_layout', 'training_data_contract',
+        'initialization', 'load_hf_weights')
     changed = [name for name in fields if parent_request.get(name) != candidate_request.get(name)]
     if bool(parent_request.get('precision_aware_optimizer', False)) != bool(
             candidate_request.get('precision_aware_optimizer', False)):

@@ -12,7 +12,60 @@ def validate_relations(relations, layers, slots):
     return rows
 
 
-def owner_patterns(relations, layers, pp, vpp, limit, time_limit_s=5.0):
+def add_owner_relations(model,owners,physical,relations):
+    for row in relations:
+        if row.relation == 'allowed_virtual':
+            for module in row.module_ids:
+                model.add_allowed_assignments([owners[module]],[(slot,) for slot in row.virtual_slots])
+        else:
+            left,right = row.module_ids
+            if row.relation == 'same_virtual':
+                model.add(owners[left]==owners[right])
+            elif row.relation == 'same_physical':
+                model.add(physical[left]==physical[right])
+            else:
+                model.add(physical[left]!=physical[right])
+
+
+def complete_partition_boundaries(domain,fixed,relations):
+    model = cp_model.CpModel()
+    ends = [model.new_int_var_from_domain(cp_model.Domain.from_values(list(values)),f'end_{index}')
+        for index,values in enumerate(domain.boundaries)]
+    for index,value in fixed.items():
+        model.add(ends[index]==value)
+    for left,right in zip(ends,ends[1:]):
+        model.add(left<right)
+    modules = sorted({module for row in relations for module in row.module_ids})
+    slots = domain.pp*domain.vpp
+    owners,physical = {},{}
+    for module in modules:
+        owners[module] = model.new_int_var(0,slots-1,f'owner_{module}')
+        physical[module] = model.new_int_var(0,domain.pp-1,f'physical_{module}')
+        model.add_modulo_equality(physical[module],owners[module],domain.pp)
+        matches = [model.new_bool_var(f'contains_{module}_{slot}') for slot in range(slots)]
+        model.add_exactly_one(matches)
+        for slot,match in enumerate(matches):
+            model.add(ends[slot]<=module).only_enforce_if(match)
+            model.add(ends[slot+1]>module).only_enforce_if(match)
+            model.add(owners[module]==slot).only_enforce_if(match)
+    add_owner_relations(model,owners,physical,relations)
+    deviations = []
+    for index,reference in enumerate(domain.seed):
+        deviation = model.new_int_var(0,domain.seed[-1],f'distance_{index}')
+        model.add_abs_equality(deviation,ends[index]-reference)
+        deviations.append(deviation)
+    model.minimize(sum(deviations))
+    solver = cp_model.CpSolver()
+    solver.parameters.num_search_workers = 1
+    status = solver.solve(model)
+    if status == cp_model.INFEASIBLE:
+        return None
+    if status != cp_model.OPTIMAL:
+        raise RuntimeError('原生模块约束补全没有完成确定性求解')
+    return tuple(solver.value(value) for value in ends)
+
+
+def owner_patterns(relations, layers, pp, vpp, limit, time_limit_s=None):
     if not relations:
         return [()], True
     modules = sorted({module for row in relations for module in row.module_ids})
@@ -26,18 +79,7 @@ def owner_patterns(relations, layers, pp, vpp, limit, time_limit_s=5.0):
     for left, right in zip(modules, modules[1:]):
         model.add(owners[left] <= owners[right])
         model.add(owners[right] - owners[left] <= right - left)
-    for row in relations:
-        if row.relation == 'allowed_virtual':
-            for module in row.module_ids:
-                model.add_allowed_assignments([owners[module]], [(slot,) for slot in row.virtual_slots])
-        else:
-            left, right = row.module_ids
-            if row.relation == 'same_virtual':
-                model.add(owners[left] == owners[right])
-            elif row.relation == 'same_physical':
-                model.add(physical[left] == physical[right])
-            else:
-                model.add(physical[left] != physical[right])
+    add_owner_relations(model,owners,physical,relations)
 
     class Collector(cp_model.CpSolverSolutionCallback):
         def __init__(self):
@@ -53,9 +95,10 @@ def owner_patterns(relations, layers, pp, vpp, limit, time_limit_s=5.0):
     solver = cp_model.CpSolver()
     solver.parameters.enumerate_all_solutions = True
     solver.parameters.num_search_workers = 1
-    if time_limit_s <= 0:
-        raise ValueError('模块归属求解时间必须为正数')
-    solver.parameters.max_time_in_seconds = time_limit_s
+    if time_limit_s is not None:
+        if time_limit_s <= 0:
+            raise ValueError('模块归属求解时间必须为正数')
+        solver.parameters.max_time_in_seconds = time_limit_s
     status = solver.solve(model, collector)
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE, cp_model.INFEASIBLE, cp_model.UNKNOWN):
         raise ValueError('模块归属组合求解没有取得可用的完成状态')

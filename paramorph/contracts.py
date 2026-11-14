@@ -232,27 +232,43 @@ class RewriteIntent(Contract):
 
 
 class SearchBudget(Contract):
-    max_agent_calls: int = Field(gt=0)
+    max_agent_calls: int | None = Field(gt=0)
     max_agent_rounds: int = Field(gt=0)
-    max_cpu_predictions: int = Field(gt=0)
-    max_profiling_gpu_hours: float = Field(ge=0, allow_inf_nan=False)
+    max_cpu_predictions: int | None = Field(gt=0)
+    max_profiling_gpu_hours: float | None = Field(ge=0, allow_inf_nan=False)
     max_full_training_trials: int = Field(ge=0)
-    max_total_gpu_hours: float = Field(ge=0, allow_inf_nan=False)
-    max_walltime_seconds: float = Field(gt=0, allow_inf_nan=False)
+    max_total_gpu_hours: float | None = Field(ge=0, allow_inf_nan=False)
+    max_walltime_seconds: float | None = Field(gt=0, allow_inf_nan=False)
     max_no_improvement_rounds: int = Field(gt=0)
     estimated_trial_seconds: float = Field(gt=0, allow_inf_nan=False)
-    max_agent_tokens: int = Field(default=1000000, gt=0)
+    max_agent_tokens: int | None = Field(default=1000000, gt=0)
     max_benchmarks_per_round: int = Field(default=1, gt=0)
     max_candidates_per_round: int = Field(default=48, gt=0)
     profiling_warmup: int = Field(default=2, ge=1)
     profiling_measured: int = Field(default=4, ge=3)
+
+    @property
+    def cpu_prediction_ceiling(self):
+        return float('inf') if self.max_cpu_predictions is None else self.max_cpu_predictions
+
+    @property
+    def profiling_gpu_ceiling(self):
+        return float('inf') if self.max_profiling_gpu_hours is None else self.max_profiling_gpu_hours
+
+    @property
+    def total_gpu_ceiling(self):
+        return float('inf') if self.max_total_gpu_hours is None else self.max_total_gpu_hours
+
+    @property
+    def walltime_ceiling(self):
+        return float('inf') if self.max_walltime_seconds is None else self.max_walltime_seconds
 
 
 class ProfilingRequest(Contract):
     request_id: str
     trial_ids: list[str]
     cost_keys: list[str]
-    measurement_type: Literal['native_training_cost_profile', 'nccl', 'compute_communication', 'memory']
+    measurement_type: Literal['native_training_cost_profile', 'native_overlap_trace', 'nccl', 'compute_communication', 'memory']
     execution_request: dict
     reason: str
     estimated_gpu_hours: float = Field(ge=0)
@@ -268,6 +284,7 @@ class TrainingRetry(Contract):
         'requires_investigation']
     evidence_reference: str = Field(min_length=1)
     reason: str = Field(min_length=1)
+    checkpoint_io_readers_per_node: Literal[1, 2] | None = None
 
 
 class SystemConfig(Contract):
@@ -296,7 +313,7 @@ class SystemConfig(Contract):
     agent_cli_model_instructions_file: str | None = None
     agent_request_profile: Literal['full', 'decision', 'compact'] = 'full'
     agent_recent_runtime_failure_evidence: bool = False
-    fsdp_load_validation_seconds: int = Field(default=120, ge=60, le=900)
+    fsdp_load_validation_seconds: int | None = Field(default=120, ge=60, le=900)
     constraint_review_policy: Literal['always', 'native_complete'] = 'always'
     single_decision_round: bool = False
     budgeted_investigation_enabled: bool = False
@@ -341,10 +358,15 @@ class SystemConfig(Contract):
     continuation_donor_selection: Literal['round_robin', 'coverage', 'anchored_coverage', 'direct_time', 'random'] = 'round_robin'
     continuation_donor_limit: int | None = Field(default=None, ge=1)
     planning_control_enabled: bool = False
+    planning_graph_guided: bool = False
     planning_selector: Literal['agent', 'deterministic_scope', 'deterministic_restart', 'deterministic_portfolio'] = 'agent'
     planning_portfolio_enabled: bool = False
-    planning_full_strategy_enabled: bool = False
-    planning_partition_engine: Literal['prefix', 'complete', 'path'] = 'prefix'
+    planning_full_strategy_enabled: bool = True
+    planning_partition_engine: Literal['prefix', 'complete', 'path','frontier'] = 'prefix'
+    planning_frontier_radius: int = Field(default=2,ge=0)
+    planning_frontier_column_queries: int = Field(default=96,ge=1)
+    planning_frontier_lp_rounds: int = Field(default=4,ge=1)
+    planning_pricing_program_path: str | None = None
     planning_budget_allocation: Literal['equal_share', 'completion_reserve'] = 'equal_share'
     planning_execution_context_enabled: bool = False
     planning_initial_prompt_limit: int | None = Field(default=10000, ge=1000)
@@ -354,11 +376,18 @@ class SystemConfig(Contract):
     planning_fixed_parent_id: str | None = None
     continuation_evaluation_timing: Literal['late', 'fixed_depth', 'early_independent', 'paired', 'budgeted_paired', 'terminal_paired', 'revisit_paired'] = 'late'
     continuation_early_fraction: float = Field(default=0.5, ge=0, le=1, allow_inf_nan=False)
-    investigation_max_seconds: float = Field(default=30.0, gt=0, allow_inf_nan=False)
+    investigation_max_seconds: float | None = Field(default=30.0, gt=0, allow_inf_nan=False)
     reference_backend_source_hashes: dict[str, str] | None = None
 
     @model_validator(mode='after')
     def validate_allocation(self):
+        if self.agent_token_budget_enabled and self.budget.max_agent_tokens is None:
+            raise ValueError('启用Agent Token额度时需要明确数值')
+        if self.planning_graph_guided and (not self.planning_control_enabled
+                or not self.planning_full_strategy_enabled or self.planning_partition_engine not in ('path','frontier')
+                or not self.agent_execution_enabled or self.agent_ablation != 'full'
+                or self.planning_selector != 'agent'):
+            raise ValueError('执行图引导搜索需要完整四角色、原生完整策略和路径分区引擎')
         per_node = self.request.get('gpus_per_node', 8)
         per_worker = self.request.get('gpus_per_worker', per_node)
         if type(per_worker) is not int or per_worker < 1 or per_node % per_worker:

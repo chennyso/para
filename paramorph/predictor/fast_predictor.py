@@ -66,7 +66,8 @@ class FastPredictor:
             payload_bytes=row['benchmark']['payload_bytes'], gamma=row['benchmark']['gamma'],
             evidence_ids=[row['id']], source=row['benchmark']['source'],
             condition=row['benchmark'].get('condition'), samples=row['benchmark']['samples'])
-            for row in self.database.overlap_profiles()]
+            for row in self.database.overlap_profiles()
+            if row['benchmark']['source']=='real_gpu_compute_communication_microbenchmark']
         resource_replay['compute_communication_slowdowns'] = [
             *resource_replay.get('compute_communication_slowdowns', []), *measured]
         resource_replay.pop('unmeasured_overlap_gamma', None)
@@ -377,6 +378,9 @@ class FastPredictor:
         directory = profile_directory / 'artifacts'
         payloads = [json.loads((directory / f'rank{rank}.paramorph-cost.json').read_text())
                     for rank in range(config.world_size)]
+        if request.get('paramorph_fsdp_component_services'):
+            from .fsdp_service_costs import exclusive_service_events
+            payloads = [exclusive_service_events(payload) for payload in payloads]
         statics = [json.loads((directory / f'rank{rank}.paramorph-static.json').read_text())
                    for rank in range(config.world_size)]
         sample_sets = defaultdict(list)
@@ -467,6 +471,14 @@ class FastPredictor:
             document['optimizer_local_costs'] = optimizer_local
             document['optimizer_component_costs'] = collect_optimizer_component_costs(payloads, request)
         document = annotate_measurement_semantics(document)
+        if request.get('paramorph_fsdp_component_services'):
+            document['measurement_semantics']['layer'].update(
+                scope='native_fsdp_layer_service_excluding_explicit_collective_waits',
+                local_service_time_verified=request.get('paramorph_fsdp_component_isolation', False),
+                explicit_collective_waits_subtracted=True)
+            document['measurement_semantics']['region'].update(
+                scope='native_fsdp_region_residual_excluding_explicit_collective_waits',
+                explicit_collective_waits_subtracted=True)
         for rank, payload in enumerate(payloads):
             for index, event in enumerate(payload['events']):
                 if event['step'] < request['warmup'] or event['kind'] != 'operator_compute':
@@ -633,7 +645,8 @@ class FastPredictor:
         prediction = ScheduleCostEvaluator(ExecutionCostModel()).evaluate(plan, topology, enforce_memory_limit=False)
         return prediction, plan
 
-    def needs_profile(self, request, started, missing, *, blind=False, partition_specific=False, persist=True):
+    def needs_profile(self, request, started, missing, *, blind=False, partition_specific=False, persist=True,
+                      memory_bound=None):
         reusable = self.database.reusable_compute_profiles(request, blind=blind)
         identity = dict(plan=plan_signature(request), missing=missing,
             cost_database_revision=self.database.cost_database_revision(),
@@ -653,7 +666,7 @@ class FastPredictor:
                                            'saved_activations', 'optimizer_states', 'native_schedule'])]),
             evaluation_seconds=time.perf_counter() - started)
         if self.projector is not None:
-            report['memory'] = self.projector.memory_bound(request, blind=blind)
+            report['memory'] = self.projector.memory_bound(request, blind=blind) if memory_bound is None else memory_bound
             report['evidence']['memory_evaluation_scope'] = (
                 'parameter_ownership_and_activation_bound_independent_of_missing_task_times')
             report['prediction_id'] = hashlib.sha256(json.dumps(dict(

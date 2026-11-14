@@ -82,7 +82,7 @@ def experiment_value(request, prediction, history, best, estimated_seconds, *, a
         kind, status = failure.get('failure_type'), measured.get('status')
         if success:
             validity.append(True)
-        elif kind == 'ENVIRONMENT' or measured.get('execution_deadline_reached'):
+        elif kind in ('ENVIRONMENT', 'CHECKPOINT_READ_FAILURE') or measured.get('execution_deadline_reached'):
             outcomes['environment'] += 1
         elif kind in ('CAPACITY', 'NUMERICAL_CORRECTNESS', 'DETERMINISTIC_CONFIGURATION',
                 'EXECUTION_CONFIG_MISMATCH', 'CHECKPOINT_FAILURE') or status in (
@@ -101,7 +101,8 @@ def experiment_value(request, prediction, history, best, estimated_seconds, *, a
     p_valid = (sum(validity) + 1) / (len(validity) + 2) if len(validity) >= 3 else None
     cost = mean(costs) if costs else world * estimated_seconds / 3600
     result = dict(predicted_step_ms=step, throughput_interval=None, predicted_gain=None,
-        expected_gain=None, expected_improvement_per_gpu_hour=None, p_valid=p_valid,
+        expected_gain=None, expected_improvement_per_gpu_hour=None,
+        expected_step_savings_ms=None, expected_step_savings_ms_per_gpu_hour=None, p_valid=p_valid,
         validity_observations=len(validity), expected_gpu_hours=cost,
         observed_failure_categories=outcomes,
         cost_basis='same_workload_actual_gpu_receipts' if costs else 'declared_budget_estimate',
@@ -116,6 +117,12 @@ def experiment_value(request, prediction, history, best, estimated_seconds, *, a
             uncertainty='EMPIRICAL_5_TO_95_PERCENTILES_WITHOUT_COVERAGE_GUARANTEE',
             predicted_gain=None if best is None else mean(throughput) - best,
             expected_gain=None if best is None else mean(max(value - best, 0.0) for value in throughput))
+        if best is not None and best > 0:
+            leader_step_ms = request['sequence'] * request['global_batch'] * 1000 / best
+            result['expected_step_savings_ms'] = mean(max(0.0, leader_step_ms - step - residual)
+                for residual in residuals)
         if p_valid is not None and result['expected_gain'] is not None and cost > 0:
             result['expected_improvement_per_gpu_hour'] = p_valid * result['expected_gain'] / cost
+        if result['expected_step_savings_ms'] is not None and cost > 0:
+            result['expected_step_savings_ms_per_gpu_hour'] = result['expected_step_savings_ms'] / cost
     return result

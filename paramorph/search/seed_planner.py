@@ -176,6 +176,11 @@ class SeedPlanner:
                             checkpoint_format='fsdp_dtensor'))
         for variant in variants:
             if variant['execution_backend'] == 'megatron_fsdp':
+                sharding = (variant['dense_sharding_strategy'], variant['expert_sharding_strategy'])
+                if 'optim_grads_params' in sharding:
+                    variant['overlap_param_gather'] = True
+                if any(value in ('optim_grads', 'optim_grads_params') for value in sharding):
+                    variant['overlap_grad_reduce'] = True
                 variant['megatron_fsdp_main_params_dtype'] = (
                     request.get('megatron_fsdp_main_params_dtype') or request.get('main_params_dtype', 'float32'))
                 variant['megatron_fsdp_main_grads_dtype'] = (

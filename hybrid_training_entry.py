@@ -9,6 +9,7 @@ import os
 import time
 from pathlib import Path
 from ddp_overlap import resolve_ddp_overlap, verify_ddp_overlap
+from training_protocol import optimizer_schedule, training_data_contract
 
 faulthandler.enable(all_threads=True)
 sys.path.append('/workspace/paper-repros-20261003')
@@ -262,10 +263,13 @@ def record_ownership(self, context):
         for field in ('lr', 'min_lr', 'weight_decay', 'adam_beta1', 'adam_beta2', 'adam_eps', 'clip_grad')}
     manifest['scheduler_configuration'] = {field: getattr(context.state.cfg.scheduler, field)
         for field in ('lr_decay_style', 'lr_decay_iters', 'lr_warmup_iters')}
-    if 'training_data_contract' in REQUEST:
-        manifest['training_data_contract'] = dict(REQUEST['training_data_contract'],
-            workers=context.state.cfg.dataset.num_workers,
-            persistent_workers=context.state.cfg.dataset.persistent_workers)
+    manifest['training_data_contract'] = dict(training_data_contract(REQUEST),
+        workers=context.state.cfg.dataset.num_workers,
+        persistent_workers=context.state.cfg.dataset.persistent_workers)
+    manifest['training_seed'] = context.state.cfg.rng.seed
+    manifest['training_data_seed'] = context.state.cfg.dataset.random_seed
+    manifest['nccl_environment'] = {name: value for name, value in os.environ.items()
+        if name.startswith('NCCL_') and name != 'NCCL_DEBUG_FILE'}
     manifest['clip_grad'] = context.state.cfg.optimizer.clip_grad
     if 'clip_grad' in REQUEST and manifest['clip_grad'] != REQUEST['clip_grad']:
         raise ValueError('实际Optimizer clip_grad与显式训练请求不一致')
@@ -284,7 +288,6 @@ def record_ownership(self, context):
         'source': 'actual_megatron_runtime_configuration_and_process_groups'}
     manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
     if REQUEST.get('profile', False):
-        import os
         import psutil
         process = psutil.Process()
         names = ('CUDA_INJECTION64_PATH', 'NVTX_INJECTION64_PATH', 'LD_PRELOAD', 'LD_LIBRARY_PATH')
@@ -426,6 +429,12 @@ def pretrain(config, forward_step_func, callbacks):
     from megatron.bridge.models.hybrid.hybrid_provider import HybridModelProvider
 
     cfg = config
+    for key, target, field in (('random_seed', cfg.rng, 'seed'),
+            ('data_random_seed', cfg.dataset, 'random_seed')):
+        if key in REQUEST:
+            if type(REQUEST[key]) is not int or REQUEST[key] < 1:
+                raise ValueError('训练与数据随机种子需要正整数')
+            setattr(target, field, REQUEST[key])
     attention = REQUEST.get('attention_backend_capabilities')
     if attention is not None and cfg.model.context_parallel_size > 1 and attention['mla_context_parallel_supported'] is False:
         raise ValueError('当前Attention后端不支持所请求的MLA Context Parallel配置：' + json.dumps(attention))
@@ -446,8 +455,11 @@ def pretrain(config, forward_step_func, callbacks):
             raise ValueError('Optimizer训练设置必须完整提供有限数值')
         for field, value in values.items():
             setattr(cfg.optimizer, field, value)
-        schedule = REQUEST.get('optimizer_schedule', dict(lr_decay_style='cosine',
-            lr_decay_iters=REQUEST['warmup'] + REQUEST['measured'], lr_warmup_iters=0))
+        cfg.scheduler.start_weight_decay = values['weight_decay']
+        cfg.scheduler.end_weight_decay = values['weight_decay']
+        cfg.scheduler.weight_decay_incr_style = 'constant'
+    schedule = optimizer_schedule(REQUEST)
+    if schedule is not None:
         if (set(schedule) != {'lr_decay_style', 'lr_decay_iters', 'lr_warmup_iters'}
                 or schedule['lr_decay_style'] not in ('constant', 'cosine')
                 or type(schedule['lr_decay_iters']) is not int or schedule['lr_decay_iters'] < 1
@@ -456,9 +468,6 @@ def pretrain(config, forward_step_func, callbacks):
             raise ValueError('学习率调度器配置不完整或取值无效')
         for field, value in schedule.items():
             setattr(cfg.scheduler, field, value)
-        cfg.scheduler.start_weight_decay = values['weight_decay']
-        cfg.scheduler.end_weight_decay = values['weight_decay']
-        cfg.scheduler.weight_decay_incr_style = 'constant'
     cfg.model.expert_tensor_parallel_size = REQUEST.get('etp', REQUEST['tp'])
     execution_backend = REQUEST.get('execution_backend', 'megatron_ddp')
     use_fsdp = execution_backend == 'megatron_fsdp'
@@ -671,6 +680,7 @@ def pretrain(config, forward_step_func, callbacks):
             cfg.model.pipeline_model_parallel_layout = PipelineParallelLayerLayout(layout, pp)
             cfg.model.pipeline_model_parallel_layout.validate_layer_layout(cfg.model.num_layers, cfg.model.mtp_num_layers)
     cfg.dataset.num_workers = 0
+    cfg.dataset.persistent_workers = False
     if 'training_data_contract' in REQUEST:
         data_contract = REQUEST['training_data_contract']
         if (set(data_contract) != {'training_index_samples', 'workers', 'persistent_workers'}

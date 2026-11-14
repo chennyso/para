@@ -36,6 +36,81 @@ def prediction_samples(trials):
             and _finite(trial['prediction'].get('performance', {}).get('step_time_ms'), positive=True)]
 
 
+def _average_ranks(values):
+    ranks = [0.0] * len(values)
+    ordered = sorted(range(len(values)), key=values.__getitem__)
+    for _, tied in itertools.groupby(enumerate(ordered, start=1), key=lambda entry: values[entry[1]]):
+        entries = list(tied)
+        rank = statistics.mean(position for position, _ in entries)
+        for _, index in entries:
+            ranks[index] = rank
+    return ranks
+
+
+def held_out_ranking(trials):
+    groups = {}
+    for trial in prediction_samples(trials):
+        provenance = trial.get('prediction_provenance_assessment') or prediction_provenance(trial)
+        if provenance['status'] == 'BLIND':
+            groups.setdefault(comparable_identity(trial), {}).setdefault(trial['plan_hash'], trial)
+
+    results = []
+    for identity, by_plan in groups.items():
+        candidates = sorted(by_plan.values(), key=lambda trial: trial['plan_hash'])
+        predicted = [trial['prediction']['performance']['step_time_ms'] for trial in candidates]
+        measured = [trial['measurement']['step_seconds'] for trial in candidates]
+        concordant = inversions = predicted_ties = measured_ties = 0
+        for left, right in itertools.combinations(range(len(candidates)), 2):
+            dx, dy = predicted[left] - predicted[right], measured[left] - measured[right]
+            concordant += dx * dy > 0
+            inversions += dx * dy < 0
+            predicted_ties += dx == 0 and dy != 0
+            measured_ties += dy == 0 and dx != 0
+        pairs = concordant + inversions
+        denominator = math.sqrt((pairs + predicted_ties) * (pairs + measured_ties))
+        chosen = min(range(len(candidates)), key=predicted.__getitem__)
+        ranked = sorted(range(len(candidates)), key=predicted.__getitem__)
+        actual = sorted(range(len(candidates)), key=measured.__getitem__)
+        comparable = len(candidates) >= 2
+        results.append(dict(condition_identity=identity, candidate_count=len(candidates),
+            comparable_pairs=pairs, inversions=inversions, inversion_rate=inversions / pairs if pairs else None,
+            spearman=statistics.correlation(_average_ranks(predicted), _average_ranks(measured))
+                if len(set(predicted)) > 1 and len(set(measured)) > 1 else None,
+            kendall_tau_b=(concordant - inversions) / denominator if denominator else None,
+            selection_regret_fraction=(1 - candidates[chosen]['measurement']['tokens_per_second'] /
+                max(trial['measurement']['tokens_per_second'] for trial in candidates)) if comparable else None,
+            top_k_recall={str(k): len(set(ranked[:k]) & set(actual[:k])) / k
+                for k in (1, 2, 3, 5) if comparable and k <= len(candidates)}))
+    return dict(scope='held_out_candidate_plans_only; within_equal_workload_hardware_backend',
+        status='AVAILABLE' if any(row['comparable_pairs'] for row in results) else 'INSUFFICIENT_EVIDENCE',
+        candidate_count=sum(row['candidate_count'] for row in results), groups=results)
+
+
+def held_out_memory_admission(trials):
+    outcomes = Counter()
+    unknown = 0
+    for trial in trials:
+        prediction, measurement = trial.get('prediction') or {}, trial.get('measurement') or {}
+        if not measurement:
+            continue
+        provenance = trial.get('prediction_provenance_assessment') or prediction_provenance(trial)
+        if provenance['status'] != 'BLIND':
+            continue
+        admission = prediction.get('memory', {}).get('admission')
+        actual_oom = (measurement.get('failure_type') == 'CUDA_OOM' or measurement.get('status') == 'CUDA_OOM'
+            or (trial.get('failure') or {}).get('failure_type') == 'CUDA_OOM')
+        passed = measurement.get('status') == 'PASS' and measurement.get('performance_eligible') is True
+        if (not actual_oom and not passed) or admission not in ('REJECT_OOM', 'WITHIN_ESTIMATED_CAPACITY'):
+            unknown += 1
+            continue
+        outcomes['false_rejection' if passed else 'correct_rejection'] += int(admission == 'REJECT_OOM')
+        outcomes['false_admission' if actual_oom else 'correct_admission'] += int(admission == 'WITHIN_ESTIMATED_CAPACITY')
+    count = sum(outcomes.values())
+    return dict(scope='held_out_predictions_with_valid_training_or_explicit_cuda_oom', sample_count=count,
+        outcomes=dict(outcomes), unknown_outcomes=unknown,
+        error_rate=(outcomes['false_rejection'] + outcomes['false_admission']) / count if count else None)
+
+
 def _source_ids(value):
     if isinstance(value, dict):
         for key, child in value.items():
@@ -63,6 +138,9 @@ def prediction_provenance(trial, evidence_order=None):
         return dict(status='SELF_CALIBRATED', independent=False,
                     candidate_measurement_sources=candidate_sources,
                     reason='预测成本或者Anchor引用当前候选的测量记录')
+    if evidence.get('calibration_scope') == 'SAME_CONFIGURATION':
+        return dict(status='SAME_CONFIGURATION_CALIBRATION', independent=False,
+                    reason='独立校准采集了同一完整配置的成本，可核对回放误差')
     recorded_before_result = False
     if evidence_order is not None:
         prediction_order = evidence_order.get(prediction.get('prediction_id'))

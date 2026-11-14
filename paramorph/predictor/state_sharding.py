@@ -16,6 +16,20 @@ def _expert_dp_size(config):
     return config.world_size // (config.etp * config.ep * config.pp)
 
 
+def native_overlap_errors(request):
+    if _value(request, 'execution_backend', 'megatron_ddp') != 'megatron_fsdp':
+        return []
+    strategy = _value(request, 'fsdp_sharding_strategy', 'no_shard')
+    sharding = (_value(request, 'dense_sharding_strategy', strategy),
+        _value(request, 'expert_sharding_strategy', strategy))
+    errors = []
+    if 'optim_grads_params' in sharding and request.get('overlap_param_gather') is not True:
+        errors.append('原生Megatron-FSDP完整状态分片要求overlap_param_gather=true')
+    if any(value in ('optim_grads', 'optim_grads_params') for value in sharding) and request.get('overlap_grad_reduce') is not True:
+        errors.append('原生Megatron-FSDP梯度分片要求overlap_grad_reduce=true')
+    return errors
+
+
 def state_sharding_errors(request, config):
     errors = []
     backend = _value(request, 'execution_backend', 'megatron_ddp')

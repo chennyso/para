@@ -81,6 +81,12 @@ class BottleneckGraph:
             raise ValueError('瓶颈查询必须引用完整执行图中存在的任务')
         return result
 
+    def execution_neighborhood(self, parent_memory, candidate_report, parent_request,
+                               candidate_request, cost_revision):
+        from search.impact_neighborhood import execution_neighborhood
+        return execution_neighborhood(dict(execution_graph=self.graph,memory=parent_memory),
+            candidate_report,parent_request,candidate_request,cost_revision)
+
     def _participants(self, key):
         row = self.records[key]
         metadata = row.get('metadata', {})
@@ -295,6 +301,38 @@ class BottleneckGraph:
         return dict(graph_id=self.graph_id, resource_model_id=_identity(resource_model or {}),
             step_time_ms=step, critical_task_ids=list(reversed(critical)),
             task_times=times, resource_diagnostics=diagnostics)
+
+    def replay_bounded_costs(self, cost_ranges, config=None, resource_model=None):
+        unknown = {key: row for key, row in self.records.items() if row['duration_ms'] is None}
+        if not unknown:
+            return dict(status='NO_MISSING_TASK_COST', step_time_scenario_ms=None, replay_count=0)
+        uncovered = [key for key, row in unknown.items() if not row['metadata'].get('missing_cost_keys')
+            or not set(row['metadata']['missing_cost_keys']) <= cost_ranges.keys()]
+        if uncovered:
+            return dict(status='UNBOUNDED_MISSING_COST', step_time_scenario_ms=None,
+                uncovered_task_ids=uncovered, replay_count=0)
+        if any(not row['metadata'].get('duration_evidence') for key, row in self.records.items() if key not in unknown):
+            return dict(status='UNBOUND_KNOWN_COST', step_time_scenario_ms=None, replay_count=0)
+        model = deepcopy(self.graph)
+        for key in unknown:
+            model['tasks'][key]['metadata']['duration_evidence'] = 'documented_cost_range_scenario'
+        scenario_graph = BottleneckGraph(model, self.evidence_refs)
+        bounds = {}
+        for key, row in unknown.items():
+            components = row['metadata'].get('cost_components', [])
+            fixed = sum(component['milliseconds'] * component['occurrences'] for component in components)
+            ranges = [cost_ranges[identity] for identity in row['metadata']['missing_cost_keys']]
+            for low, high in ranges:
+                if _finite_nonnegative(low, '成本区间最小值') > _finite_nonnegative(high, '成本区间最大值'):
+                    raise ValueError('成本区间的最大值小于最小值')
+            counts = row['metadata']['missing_cost_occurrences']
+            bounds[key] = [fixed + sum(interval[index] * counts[identity]
+                for identity, interval in zip(row['metadata']['missing_cost_keys'], ranges, strict=True)) for index in range(2)]
+        outcomes = [scenario_graph.replay({key: values[index] for key, values in bounds.items()},
+            config=config, resource_model=resource_model)['step_time_ms'] for index in range(2)]
+        return dict(status='MODELED_SCENARIOS', step_time_scenario_ms=sorted(outcomes),
+            endpoint_replays_ms=outcomes, replay_count=2, proved_lower_bound=False,
+            scope='joint_endpoint_scenarios_not_statistical_interval_or_pruning_bound')
 
     def epsilon_impact(self, task_ids, epsilon, config=None, resource_model=None, baseline_replay=None):
         selected = self._validate_task_ids(task_ids)

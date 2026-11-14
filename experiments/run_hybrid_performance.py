@@ -4,7 +4,9 @@ import fcntl
 import hashlib
 import io
 import json
+import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -14,9 +16,11 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'paramorph'))
 from schedule_validator import ScheduleValidator
 from hybrid_node import launch_geometry
+from host_memory_admission import check_host_admission
 from predictor.runtime_receipt import validate_training_result
 PODS = tuple(os.environ.get('PARAMELD_TRAINER_PODS', '').split())
 REMOTE = Path(os.environ.get('PARAMELD_REMOTE_RUNS', '/workspace/frontier/hybrid-performance-20261008'))
@@ -212,6 +216,21 @@ def launch_training_node(node, request, run):
         return state
 
 
+def runtime_source_paths():
+    return {'native_hybrid_train.py': ROOT / 'experiments/native_hybrid_train.py',
+        'hybrid_training_entry.py': ROOT / 'hybrid_training_entry.py',
+        'training_protocol.py': ROOT / 'experiments/training_protocol.py',
+        'host_memory_admission.py': ROOT / 'experiments/host_memory_admission.py',
+        'ddp_overlap.py': ROOT / 'paramorph/ddp_overlap.py',
+        'checkpoint_io_guard.py': ROOT / 'checkpoint_io_guard.py',
+        'frontier_hybrid_provider.py': ROOT / 'frontier_hybrid_provider.py',
+        'frontier_falcon_cut.py': ROOT / 'frontier_falcon_cut.py',
+        'frontier_hybrid_router.py': ROOT / 'frontier_hybrid_router.py',
+        'native_frontier_checkpoint.py': ROOT / 'integration/megatron/core/frontier/megatron/native_checkpoint.py',
+        'hybrid_artifact_export.py': ROOT / 'experiments/hybrid_artifact_export.py',
+        'hybrid_node.py': ROOT / 'experiments/hybrid_node.py'}
+
+
 def execute(request, output, nodes, resume_existing=False, extra_sources=None, metadata_archive=None,
             release_allocation=None, source_overrides=None, collection_mode=None, launch_confirmed=None):
     node_count = request.get('node_count', 2)
@@ -269,16 +288,7 @@ def execute(request, output, nodes, resume_existing=False, extra_sources=None, m
         directory.mkdir(parents=True, exist_ok=True)
         code = directory / 'code'
         code.mkdir(exist_ok=True)
-        runtime_sources = {'native_hybrid_train.py': ROOT / 'experiments/native_hybrid_train.py',
-            'hybrid_training_entry.py': ROOT / 'hybrid_training_entry.py',
-            'ddp_overlap.py': ROOT / 'paramorph/ddp_overlap.py',
-            'checkpoint_io_guard.py': ROOT / 'checkpoint_io_guard.py',
-            'frontier_hybrid_provider.py': ROOT / 'frontier_hybrid_provider.py',
-            'frontier_falcon_cut.py': ROOT / 'frontier_falcon_cut.py',
-            'frontier_hybrid_router.py': ROOT / 'frontier_hybrid_router.py',
-            'native_frontier_checkpoint.py': ROOT / 'integration/megatron/core/frontier/megatron/native_checkpoint.py',
-            'hybrid_artifact_export.py': ROOT / 'experiments/hybrid_artifact_export.py',
-            'hybrid_node.py': ROOT / 'experiments/hybrid_node.py'}
+        runtime_sources = runtime_source_paths()
         if set(source_overrides or {}) - set(runtime_sources):
             raise ValueError('历史运行代码包含未注册的源文件')
         runtime_sources.update(source_overrides or {})
@@ -317,7 +327,17 @@ def execute(request, output, nodes, resume_existing=False, extra_sources=None, m
         if resume_existing and len(start_nodes) < len(nodes):
             confirm_launch()
         if start_nodes:
-            list(pool.map(lambda node: node_action(node, request, 'preflight', remote), start_nodes))
+            preflight = list(pool.map(lambda node: node_action(node, request, 'preflight', remote), start_nodes))
+            if len(start_nodes) == len(nodes):
+                admission = check_host_admission(preflight, start_nodes, devices_per_worker,
+                    request.get('host_optimizer_lower_bound_per_physical_rank_bytes', {}))
+                write(directory / 'host-memory-admission.json', admission)
+                if admission['violations']:
+                    result = dict(request, status='HOST_MEMORY_ADMISSION_REJECTED', performance_eligible=False,
+                        gpu_allocation_seconds=0.0, execution_deadline_reached=False,
+                        host_memory_admission=admission, source_hashes=sources, raw_artifacts=str(directory))
+                    write(directory / 'result.json', result)
+                    return result
             if len(start_nodes) == len(nodes):
                 started = time.monotonic()
                 write(allocation_path, dict(started_unix_seconds=time.time(), allocated_devices=world))
@@ -447,6 +467,12 @@ def execute(request, output, nodes, resume_existing=False, extra_sources=None, m
             or not benchmark['records'] or any(not row['samples'] or
                 any(value <= 0 for value in row['samples']) for row in benchmark['records'])):
             raise ValueError('NCCL成本测量没有覆盖实际参与设备和有效计时')
+        transport_by_log = {}
+        for log in sorted(artifacts.glob('nccl-*.log')):
+            observed = sorted(set(re.findall(r'\bvia ((?:P2P|SHM|NET)/[^\s]+)', log.read_text(errors='replace'))))
+            if observed:
+                transport_by_log[log.name] = observed
+        benchmark['observed_transport_by_log'] = transport_by_log
         record.update(status='PASS', nccl_benchmark=benchmark,
                       nccl_batch_cost_keys=request.get('nccl_batch_cost_keys', []),
                       nccl_batch_profile_request_ids=request.get('nccl_batch_profile_request_ids', []),
@@ -484,6 +510,9 @@ def execute(request, output, nodes, resume_existing=False, extra_sources=None, m
                 raise ValueError('The hybrid timing or input accounting differs from the request')
             if not all(step['optimizer_update_successful'] for step in row['steps']):
                 raise ValueError('A hybrid optimizer update failed')
+            if any((step['grad_norm'] is not None and not math.isfinite(step['grad_norm']))
+                    or any(not math.isfinite(value) for value in step['loss'].values()) for step in row['steps']):
+                raise ValueError('正式测量发现非有限梯度范数或损失')
         window = max(row['window_seconds'] for row in rows)
         record.update(status='PASS', performance_eligible=not (request.get('profile', False)
             or request.get('instrumented', False) or request.get('validation_mode')),

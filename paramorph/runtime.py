@@ -470,6 +470,27 @@ class RuntimeEvidence:
                 previous_grad_reduce_group_id=None if previous_group is None else identifiers[id(previous_group)]))
             if not calibrate or len(ranks) == 1:
                 continue
+            original_check = group.check_grads
+            def check_grads(*args, original=original_check, current=group, group_id=identifier, **kwargs):
+                completed = False
+                try:
+                    result = original(*args, **kwargs)
+                    completed = True
+                    return result
+                finally:
+                    if not completed:
+                        rows = []
+                        with torch.no_grad():
+                            for index, bucket in enumerate(current.buckets):
+                                flat = bucket.grad_data.detach().view(-1)
+                                nonfinite = sum(int((~torch.isfinite(chunk)).sum().item())
+                                    for chunk in flat.split(2 ** 20))
+                                rows.append(dict(bucket=index, elements=flat.numel(), dtype=str(flat.dtype),
+                                    nonfinite_elements=nonfinite))
+                        with (self.output / f'rank{self.rank}.numerical-failure.jsonl').open('a') as stream:
+                            stream.write(json.dumps(dict(rank=self.rank, step=self.step, group_id=group_id,
+                                stage='before_data_parallel_collective', buckets=rows), allow_nan=False) + '\n')
+            group.check_grads = check_grads
             original_ready = group.register_grad_ready
             def ready(parameter, *args, original=original_ready, current=group, **kwargs):
                 current.paramorph_last_ready_parameter = parameter_names[id(parameter)]
@@ -658,6 +679,28 @@ class RuntimeEvidence:
         return rows
 
     def install(self):
+        trace_async_waits = self.request.get('paramorph_trace_async_p2p_waits', False)
+        async_inputs = {}
+
+        def bind_consumers(tensors, identity):
+            if not trace_async_waits:
+                return identity
+            tensors = tensors if isinstance(tensors, (list, tuple)) else (tensors,)
+            messages = [async_inputs.pop(id(tensor)) for tensor in tensors if id(tensor) in async_inputs]
+            return dict(identity, async_input_message_ids=messages) if messages else identity
+
+        class ObservedP2PWork:
+            def __init__(self, work, message):
+                self.work, self.message = work, message
+
+            def __getattr__(self, name):
+                return getattr(self.work, name)
+
+            def wait(self, *args, **kwargs):
+                return runtime.record('pp_p2p_wait', 'pp_p2p_wait', self.work.wait,
+                    args, kwargs, self.message)
+
+        runtime = self
         original_gradient_hook = DistributedDataParallel._make_backward_post_hook
         def gradient_hook_factory(instance, parameter):
             original = original_gradient_hook(instance, parameter)
@@ -714,7 +757,7 @@ class RuntimeEvidence:
                 else:
                     kwargs = dict(kwargs, forward_step_func=measured_step)
             result = self.record('forward_compute', 'region_forward', original_forward,
-                                 args, kwargs, identity)
+                                 args, kwargs, bind_consumers(values.get('input_tensor'), identity))
             if self.numerical_capture is not None:
                 self.numerical_capture('forward', identity, result[0])
             tensors = result[0] if isinstance(result[0], list) else [result[0]]
@@ -732,8 +775,9 @@ class RuntimeEvidence:
             ids = [self.identities[tensor_id] for tensor_id in tensor_ids]
             if not ids or any(item != ids[0] for item in ids):
                 raise ValueError('Backward缺少对应Forward身份')
+            identity = bind_consumers(output_tensor_grad, ids[0])
             result = self.record('backward_compute', 'region_backward', original_backward,
-                (input_tensor, output_tensor, output_tensor_grad, config), {}, ids[0])
+                (input_tensor, output_tensor, output_tensor_grad, config), {}, identity)
             if self.numerical_capture is not None:
                 self.numerical_capture('dgrad', ids[0], result)
             for tensor_id in tensor_ids:
@@ -794,6 +838,18 @@ class RuntimeEvidence:
                     [kwargs['tensor_send_next'], kwargs['tensor_send_prev']], 'send')
             result = self.record('pp_p2p_exchange', 'pp_p2p_exchange', original_communicate,
                                  (instance,), kwargs, identity)
+            if trace_async_waits and not identity['completion_waited'] and identity['messages']:
+                recv_prev, recv_next, handles = result
+                names = ('send_next', 'send_prev', 'recv_prev', 'recv_next')
+                messages = dict(zip((name for name, row in zip(names, operations, strict=True) if row[0]),
+                                    identity['messages'], strict=True))
+                if not isinstance(handles, dict) or handles.keys() != messages.keys():
+                    raise ValueError('异步 P2P 等待句柄没有对应真实的消息')
+                for tensor, name in ((recv_prev, 'recv_prev'), (recv_next, 'recv_next')):
+                    if tensor is not None:
+                        async_inputs[id(tensor)] = messages[name]['message_id']
+                result = (recv_prev, recv_next, {
+                    name: ObservedP2PWork(handle, messages[name]) for name, handle in handles.items()})
             if self.memory_audit is not None:
                 self.memory_audit.track_communication(result[:2], 'receive')
                 self.memory_audit.snapshot('pipeline_receive_published')
@@ -1016,7 +1072,9 @@ class RuntimeEvidence:
             trace_steps = self.request.get('paramorph_trace_steps', 1)
             if trace_steps < 1 or trace_steps > callback.args.measured:
                 raise ValueError('CUDA Trace 步数必须位于 1 到 measured 之间')
-            if (self.request.get('paramorph_trace', False)
+            physical_rank = self.request.get('rank_mapping', list(range(dist.get_world_size())))[self.rank]
+            trace_ranks = self.request.get('profile_ranks', list(range(dist.get_world_size())))
+            if (self.request.get('paramorph_trace', False) and physical_rank in trace_ranks
                     and self.step == callback.args.warmup + callback.args.measured - trace_steps):
                 self.profiler = torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
                     torch.profiler.ProfilerActivity.CUDA], record_shapes=False, with_stack=False,

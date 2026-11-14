@@ -1,4 +1,4 @@
-from predictor.state_sharding import state_sharding_errors
+from predictor.state_sharding import native_overlap_errors, state_sharding_errors
 from scheduling.native_microbatches import valid_microbatch_group
 from graph.native_recomputation import selective_modules
 
@@ -37,6 +37,7 @@ class ParallelValidator:
         if config.pp == 1 and config.vpp > 1:
             errors.append('当前Megatron虚拟Pipeline初始化要求PP至少为两个阶段')
         request = dict(config.execution_implementation)
+        errors.extend(native_overlap_errors(request))
         overlap = request.get('overlap_p2p') is True
         if overlap and (config.vpp == 1 or request.get('batch_p2p_comm') is True):
             errors.append('P2P重叠需要交错流水线且不能同时使用批量P2P通信')

@@ -6,6 +6,41 @@ from graph.process_groups import process_groups
 SHAPE_FIELDS = ('tp', 'pp', 'cp', 'dp', 'ep', 'etp', 'vpp')
 
 
+def coupled_bottleneck_moves(analysis):
+    choices = {
+        'tp_comm': ('tp', 'pp', 'dp', 'rank_mapping', 'decoder_chunks'),
+        'pp_p2p_send': ('pp', 'vpp', 'micro_batch', 'group', 'overlap_p2p', 'decoder_chunks'),
+        'pp_p2p_recv': ('pp', 'vpp', 'micro_batch', 'group', 'overlap_p2p', 'decoder_chunks'),
+        'pp_p2p_exchange': ('pp', 'vpp', 'micro_batch', 'group', 'overlap_p2p', 'decoder_chunks'),
+        'dp_reduce': ('dp', 'rank_mapping', 'optimizer_sharding', 'overlap_grad_reduce'),
+        'optimizer_step': ('dp', 'tp', 'optimizer_sharding', 'overlap_param_gather', 'decoder_chunks'),
+        'optimizer_prepare_grads': ('dp', 'optimizer_sharding', 'overlap_grad_reduce', 'decoder_chunks'),
+        'optimizer_local_grad_norm': ('dp', 'tp', 'optimizer_sharding', 'decoder_chunks'),
+        'cp_comm': ('cp', 'tp', 'pp', 'rank_mapping', 'decoder_chunks'),
+        'ep_all_to_all': ('ep', 'etp', 'rank_mapping', 'overlap_p2p', 'decoder_chunks'),
+        'recompute': ('recompute', 'micro_batch', 'decoder_chunks'),
+        'forward_compute': ('tp', 'micro_batch', 'decoder_chunks', 'recompute'),
+        'backward_compute': ('tp', 'micro_batch', 'decoder_chunks', 'recompute'),
+        'offload_wait': ('optimizer_sharding', 'recompute', 'micro_batch', 'decoder_chunks'),
+        'fsdp_unshard': ('optimizer_sharding', 'micro_batch', 'rank_mapping', 'decoder_chunks'),
+    }
+    rows = []
+    for bottleneck in analysis.get('bottlenecks', []):
+        operation = bottleneck['operation']
+        wait = max((row['resource_wait_ms'] for row in bottleneck.get('target_wait_causes', {}).values()),
+            default=0)
+        dimensions = list(choices.get(operation, ()))
+        if wait > 0:
+            dimensions.extend(('rank_mapping', 'overlap_p2p'))
+        if dimensions:
+            rows.append(dict(operation=operation, region=bottleneck['region_id'],
+                source_tasks=bottleneck['target_task_ids'], resource_wait_ms=wait,
+                reference_counterfactual_ms=bottleneck['full_iteration_impact_ms'],
+                adjustable_dimensions=list(dict.fromkeys(dimensions)), target_performance='UNKNOWN',
+                evidence_id=analysis.get('evidence_id') or analysis.get('graph_evidence_id')))
+    return rows
+
+
 def execution_shape(request):
     return tuple(request.get('etp', request['tp']) if key == 'etp' else request[key] for key in SHAPE_FIELDS)
 

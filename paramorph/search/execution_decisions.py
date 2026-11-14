@@ -1,12 +1,15 @@
 from collections import Counter, defaultdict
+import json
 import math
+from pathlib import Path
 
 from core_data_models import Task, TaskType
+from evaluation.prediction_metrics import prediction_provenance
 from graph.bottleneck_analysis import BottleneckGraph
 from scheduling.schedule_simulator import union_length
 
 
-DECISION_REPORT_REVISION = 'execution_decisions_v2_native_origins'
+DECISION_REPORT_REVISION = 'execution_decisions_v3_recorded_execution_predictions'
 
 
 def duration_ms(record):
@@ -133,7 +136,7 @@ def execution_analysis(trial, structural_graph, prediction_graph, decision_index
     return report
 
 
-def candidate_decisions(parent, candidates):
+def candidate_decisions(parent, candidates, evidence_order=None):
     base = measured_result(parent)
     base_request = parent['plan']['backend_config']
     rows = []
@@ -143,13 +146,36 @@ def candidate_decisions(parent, candidates):
         validation = (trial.get('validation') or {}).get('load_validation') or {}
         request = trial['plan']['backend_config']
         elapsed = prediction.get('performance', {}).get('step_time_ms')
-        admission = prediction.get('memory', {}).get('admission')
+        memory = prediction.get('memory', {})
+        admission = memory.get('admission')
         failure = trial.get('failure')
+        observed = trial.get('measurement') or {}
+        recorded_prediction = {}
+        if result is not None:
+            execution = json.loads((Path(result['raw_artifacts']).parent/'request.json').read_text())
+            assert execution['run_id']==result['run_id']
+            recorded_prediction = execution.get('prediction_gate') or {}
+        recorded_elapsed = recorded_prediction.get('performance',{}).get('step_time_ms')
+        provenance = prediction_provenance(trial, evidence_order) if observed else None
+        recorded_memory = recorded_prediction.get('memory',{})
+        predicted_allocated = recorded_memory.get('allocated_peak_per_rank_bytes',recorded_memory.get('peak_allocated_per_rank_bytes'))
+        measured_allocated = None if result is None else result.get('peak_allocated_gib')
+        allocator_error = (max(predicted_allocated.values()) / 2**30 - measured_allocated
+            if predicted_allocated and measured_allocated is not None else None)
         state = ('MEASURED' if result is not None else 'EXCLUDED' if failure or admission == 'REJECT_OOM'
-            else 'READY_FOR_BENCHMARK' if validation.get('status') == 'PASS'
+            else 'READY_FOR_BENCHMARK' if validation.get('status') == 'PASS' and elapsed is not None
+                and admission=='WITHIN_ESTIMATED_CAPACITY' and prediction.get('performance',{}).get('ranking_eligible',True)
             else 'PREDICTED' if elapsed is not None else 'UNRESOLVED')
         rows.append(dict(trial_id=trial['trial_id'], state=state,
             predicted_step_ms=elapsed, memory_admission=admission,
+            prediction_provenance=provenance,
+            measurement_prediction_scope='recorded_before_gpu_execution' if recorded_prediction else
+                'initial_baseline_without_prior_prediction' if result is not None else 'NOT_MEASURED',
+            measurement_prediction_id=recorded_prediction.get('prediction_id'),
+            measured_step_error_fraction=None if result is None or recorded_elapsed is None else
+                recorded_elapsed / (result['step_seconds'] * 1000) - 1,
+            allocated_peak_error_gib=allocator_error,
+            failure_type=observed.get('failure_type') or (failure or {}).get('failure_type'),
             measured_tokens_per_second=None if result is None else result['tokens_per_second'],
             measured_gain_vs_parent=None if result is None or base is None else
                 result['tokens_per_second'] / base['tokens_per_second'] - 1,
@@ -172,7 +198,7 @@ def candidate_decisions(parent, candidates):
                 if base_request.get(name) != request.get(name)},
             missing_measurements=prediction.get('evidence', {}).get('missing_profiles', [])[:4],
             evidence_refs=[value for value in (prediction.get('prediction_id'),
-                (result or {}).get('run_id'), validation.get('run_id')) if value]))
+                observed.get('run_id'), validation.get('run_id')) if value]))
     return dict(revision=DECISION_REPORT_REVISION, parent_trial_id=parent['trial_id'],
         parent_measurement_evidence_id=None if base is None else base['run_id'], candidates=rows,
         predicted_order=[row['trial_id'] for row in sorted(rows,

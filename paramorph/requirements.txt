@@ -1,9 +1,14 @@
 httpx[socks]>=0.28,<1
+ijson
 matplotlib
+joblib
 numpy
 networkx>=3
 openai
 ortools
 pydantic>=2
+psutil
 scipy
+scikit-learn>=1.5
+scikit-optimize>=0.10.2
 tiktoken

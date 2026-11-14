@@ -15,8 +15,9 @@ from scheduling.task_graph_builder import TaskGraphBuilder
 class StateShardingTests(unittest.TestCase):
     def request(self, strategy='no_shard', dp=4, tp=2, pp=1, vpp=1):
         world = tp * pp * dp
-        return dict(run_id='state-test', tp=tp, cp=1, pp=pp, dp=dp, ep=1, etp=tp,
-            expert_dp=dp, vpp=vpp, group=max(1, pp), sequence=128, micro_batch=1,
+        expert_dp = tp * dp
+        return dict(run_id='state-test', tp=tp, cp=1, pp=pp, dp=dp, ep=1, etp=1,
+            expert_dp=expert_dp, vpp=vpp, group=max(1, pp), sequence=128, micro_batch=1,
             global_batch=max(8, dp * 2), offload=False, recompute='full',
             decoder_chunks=[4 // (pp * vpp)] * (pp * vpp), node_count=1,
             gpus_per_node=world, precision='bfloat16', execution_backend='megatron_fsdp',
@@ -25,7 +26,7 @@ class StateShardingTests(unittest.TestCase):
             megatron_fsdp_version=1, optimizer_sharding='distributed',
             fsdp_sharding_strategy=strategy, dense_sharding_strategy=strategy,
             expert_sharding_strategy='no_shard',
-            dp_inner_size=dp, dp_outer_size=1, expert_dp_inner_size=dp,
+            dp_inner_size=dp, dp_outer_size=1, expert_dp_inner_size=expert_dp,
             expert_dp_outer_size=1, outer_sharding_strategy='no_shard',
             expert_outer_sharding_strategy='no_shard', checkpoint_format='fsdp_dtensor',
             optimizer_checkpoint_mode='disabled', fsdp_multi_chunk_supported=True,

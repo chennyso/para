@@ -1,17 +1,3 @@
-"""train_downloaded_model.py 的 VPP 增强版本。
-
-新增参数：
-  --vpp VPP            virtual pipeline depth（默认 1，即 1F1B）
-  --group GROUP        microbatch group size，VPP>1 时必须整除 microbatches
-  --warmup WARMUP      预热步数（覆盖原来的默认值 0，推荐 20）
-  --measured MEASURED  正式测量步数（默认 100）
-
-其他改动：
-  - VPP>1 时自动计算均匀 decoder_chunks，末尾阶段补余数层
-  - VPP>1 时自动开启 overlap_p2p_comm
-  - 合法性断言：16 % (tp * pp) == 0，global_batch % (dp * mbs) == 0，
-    VPP>1 时 pp <= group <= microbatches 且整除
-"""
 import argparse
 import copy
 import json
@@ -29,8 +15,22 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from megatron.bridge import AutoBridge
+from megatron.bridge.models.gpt_provider import GPTModelProvider
 from megatron.bridge.models.falcon_h1.falconh1_provider import FalconH1ModelProvider
 from megatron.bridge.training.callbacks import Callback
+from megatron.bridge.training.config import (
+    CheckpointConfig,
+    ConfigContainer,
+    DistributedDataParallelConfig,
+    DistributedInitConfig,
+    GPTDatasetConfig,
+    LoggerConfig,
+    OptimizerConfig,
+    SchedulerConfig,
+    TokenizerConfig,
+    TrainingConfig,
+    ValidationConfig,
+)
 from megatron.bridge.training.gpt_step import forward_step
 from megatron.bridge.training.mixed_precision import get_mixed_precision_config
 from megatron.bridge.training.pretrain import pretrain
@@ -41,7 +41,6 @@ from megatron.core.ssm.mamba_layer import MambaLayer
 from megatron.core.tensor_parallel.layers import VocabParallelEmbedding
 from torch.utils._pytree import tree_leaves
 from hybrid_moe_metrics import configure_hybrid_moe_metrics
-from hf_fused_mamba_norm import HFFusedRMSNormMambaMixer
 
 
 def unwrap_model(model):
@@ -232,6 +231,52 @@ def uniform_decoder_chunks(num_layers, pp, vpp):
     return tuple(base + (1 if i < remainder else 0) for i in range(total_stages))
 
 
+def build_training_config(args):
+    structure = json.loads((args.model/'config.json').read_text())
+    if structure.get('parameld_architecture') == 'gpt3':
+        if not args.from_scratch or args.load_hf_weights:
+            raise ValueError('GPT-3 配置需要明确选择固定种子随机初始化')
+        model = GPTModelProvider(num_layers=structure['num_hidden_layers'],
+            hidden_size=structure['hidden_size'], num_attention_heads=structure['num_attention_heads'],
+            ffn_hidden_size=structure['intermediate_size'], vocab_size=structure['vocab_size'],
+            make_vocab_size_divisible_by=128, seq_length=args.sequence,
+            position_embedding_type='learned_absolute', normalization='LayerNorm',
+            layernorm_epsilon=1e-5, activation_func=F.gelu, gated_linear_unit=False,
+            add_bias_linear=True, add_qkv_bias=True, share_embeddings_and_output_weights=True,
+            hidden_dropout=0.0, attention_dropout=0.0, attention_backend=AttnBackend.auto)
+    else:
+        model = AutoBridge.from_hf_pretrained(args.model, trust_remote_code=True).to_megatron_provider(
+            load_weights=args.load_hf_weights)
+    return ConfigContainer(
+        model=model,
+        train=TrainingConfig(train_iters=args.warmup + args.measured, micro_batch_size=args.micro_batch,
+                             global_batch_size=args.global_batch),
+        validation=ValidationConfig(eval_interval=None, eval_iters=0),
+        optimizer=OptimizerConfig(optimizer="adam", lr=1.0e-6, min_lr=1.0e-7, weight_decay=0.1,
+                                  bf16=True, use_distributed_optimizer=True),
+        scheduler=SchedulerConfig(lr_warmup_iters=0, lr_decay_iters=1, lr_decay_style="constant",
+                                  start_weight_decay=0.1, end_weight_decay=0.1,
+                                  weight_decay_incr_style="constant"),
+        dataset=GPTDatasetConfig(seq_length=args.sequence, data_path=str(args.data), random_seed=1234,
+                                 reset_attention_mask=False, reset_position_ids=False, eod_mask_loss=False,
+                                 num_dataset_builder_threads=1, split="99,1,0", data_sharding=True,
+                                 dataloader_type="single", num_workers=2,
+                                 skip_getting_attention_mask_from_dataset=True),
+        logger=LoggerConfig(log_interval=1, tensorboard_dir=str(args.output / "tensorboard"),
+                            log_memory_to_tensorboard=False),
+        tokenizer=TokenizerConfig(tokenizer_type="HuggingFaceTokenizer", tokenizer_model=str(args.model)),
+        checkpoint=CheckpointConfig(load=None, pretrained_checkpoint=None if args.load_hf_weights or args.from_scratch else str(args.checkpoint),
+                                    save=None, save_interval=None, ckpt_format="torch_dist", load_optim=False,
+                                    load_rng=False, save_optim=False, save_rng=False),
+        ddp=DistributedDataParallelConfig(check_for_nan_in_grad=True, grad_reduce_in_fp32=True,
+                                          overlap_grad_reduce=True, overlap_param_gather=True,
+                                          average_in_collective=True, data_parallel_sharding_strategy="optim_grads_params",
+                                          use_distributed_optimizer=True),
+        dist=DistributedInitConfig(),
+        mixed_precision="bf16_mixed",
+    )
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=Path, required=True)
@@ -259,6 +304,7 @@ def main():
     parser.add_argument("--unfused-bda", action="store_true")
     parser.add_argument("--hf-fused-mamba-norm", action="store_true")
     parser.add_argument("--load-hf-weights", action="store_true")
+    parser.add_argument("--from-scratch", action="store_true")
     args = parser.parse_args()
     if args.vpp < 1:
         raise ValueError('The virtual pipeline count must be positive')
@@ -270,7 +316,7 @@ def main():
         args.group = args.pp
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
     torch.cuda.set_per_process_memory_fraction(31 * 2**30 / torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory)
-    if not args.load_hf_weights:
+    if not args.load_hf_weights and not args.from_scratch:
         assert (args.checkpoint / "iter_0000000/.metadata").is_file()
     assert Path(str(args.data) + ".bin").is_file()
     args.output.mkdir(parents=True, exist_ok=True)
@@ -289,12 +335,10 @@ def main():
             f"microbatches={microbatches} not divisible by group={args.group}"
     os.environ.update(TRAIN_ITERS=str(args.warmup + args.measured), GLOBAL_BATCH_SIZE=str(args.global_batch),
                       MICROBATCH_GROUP_SIZE=str(args.group), OUTPUT_PATH=str(args.output))
-    sys.path.append("/workspace/tools")
-    from train_qwen3_8b_bridge_vpp import build_config
-    cfg = build_config()
-    cfg.model = AutoBridge.from_hf_pretrained(args.model, trust_remote_code=True).to_megatron_provider(
-        load_weights=args.load_hf_weights)
+    cfg = build_training_config(args)
     if args.hf_fused_mamba_norm:
+        from hf_fused_mamba_norm import HFFusedRMSNormMambaMixer
+
         cfg.model.hybrid_stack_spec = copy.deepcopy(cfg.model._resolve_hybrid_stack_spec())
         cfg.model.hybrid_stack_spec.submodules.mamba_layer.submodules.mixer.module = HFFusedRMSNormMambaMixer
     if isinstance(cfg.model, FalconH1ModelProvider):
@@ -362,7 +406,7 @@ def main():
     cfg.tokenizer.tokenizer_model = str(args.model)
     cfg.tokenizer.use_tokenizer_vocab_size = False
     cfg.tokenizer.hf_tokenizer_kwargs = {"trust_remote_code": True, "use_fast": True}
-    cfg.checkpoint.pretrained_checkpoint = None if args.load_hf_weights else str(args.checkpoint)
+    cfg.checkpoint.pretrained_checkpoint = None if args.load_hf_weights or args.from_scratch else str(args.checkpoint)
     if args.cpu_offload:
         cfg.optimizer.optimizer_cpu_offload = True
         cfg.optimizer.optimizer_offload_fraction = 1.0
