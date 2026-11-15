@@ -1,4 +1,6 @@
 import hashlib
+import base64
+import gzip
 import json
 import os
 from pathlib import Path
@@ -30,6 +32,22 @@ class AgentResponseFailure(RuntimeError):
 
 def encoded(value):
     return json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=False)
+
+
+def encode_transport_payload(value):
+    content = encoded(value).encode()
+    return dict(encoding='gzip_base64_v1', raw_bytes=len(content),
+        sha256=hashlib.sha256(content).hexdigest(),
+        payload=base64.b64encode(gzip.compress(content, mtime=0)).decode())
+
+
+def decode_transport_payload(envelope):
+    if envelope['encoding'] != 'gzip_base64_v1':
+        raise ValueError('Agent传输编码版本无效')
+    content = gzip.decompress(base64.b64decode(envelope['payload'], validate=True))
+    if len(content) != envelope['raw_bytes'] or hashlib.sha256(content).hexdigest() != envelope['sha256']:
+        raise ValueError('Agent传输内容长度或摘要不同')
+    return json.loads(content)
 
 
 def atomic_write(path,value):

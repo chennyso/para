@@ -1,4 +1,37 @@
 from copy import deepcopy
+import json
+
+
+REFERENCE_INSTRUCTIONS = ('\nJSON对象中的$ref引用当前observation内的JSON Pointer；'
+    '读取该位置的完整记录作为当前值。相同记录只提供一次，全部字段及候选保持可访问。')
+
+
+def deduplicate_observation(observation):
+    references = {}
+    reused = 0
+
+    def visit(value, pointer):
+        nonlocal reused
+        if not isinstance(value, (dict, list)):
+            return value
+        encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
+        if len(encoded) >= 256:
+            if encoded in references:
+                reference = {'$ref': '#' + references[encoded]}
+                if len(json.dumps(reference)) < len(encoded):
+                    reused += 1
+                    return reference
+            references[encoded] = pointer
+        if isinstance(value, list):
+            return [visit(item, pointer + '/' + str(index)) for index, item in enumerate(value)]
+        return {key: visit(item, pointer + '/' + key.replace('~', '~0').replace('/', '~1'))
+                for key, item in value.items()}
+
+    canonical = json.loads(json.dumps(observation, ensure_ascii=False, allow_nan=False))
+    result = visit(canonical, '')
+    return result, dict(representation='json_reference_v1', shared_record_references=reused,
+        original_characters=len(json.dumps(observation, ensure_ascii=False, separators=(',', ':'))),
+        encoded_characters=len(json.dumps(result, ensure_ascii=False, separators=(',', ':'))))
 
 
 def role_observation(role, observation):

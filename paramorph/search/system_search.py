@@ -626,7 +626,7 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
                 'search/planning_portfolio.py', 'search/complete_partition.py',
                 'search/execution_path_model.py', 'search/graph_action_compiler.py', 'graph/strategy_impact.py',
                 'search/execution_view.py', 'scheduling/native_microbatches.py',
-                'search/frontier_pricer.py','search/linear_pricing_bound.py',
+                'search/frontier_pricer.py','search/linear_pricing_bound.py', 'search/measurement_review.py',
                 'search/physical_stage_master.py','search/physical_stage_search.py',
                 'search/boundary_certificates.py','search/impact_neighborhood.py',
                 'search/fragment_cost_cache.py','search/module_relations.py',
@@ -4287,6 +4287,10 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
         observation_limit = None if input_limit is None else input_limit - fixed_tokens
         visible, packing = pack_context(visible, observation_limit, token_count)
         visible = self.visible_observation(visible)
+        from agents.context_budget import deduplicate_observation, REFERENCE_INSTRUCTIONS
+        visible, references = deduplicate_observation(visible)
+        packing['shared_records'] = references
+        instructions += REFERENCE_INSTRUCTIONS
         prompt = ('Use only the supplied observation. Request backend tools through the JSON tool_requests field. '
                   'Do not access files, edit source code, or invent measurements. '
                   'Return one object matching the output schema.\n'
@@ -7017,39 +7021,56 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
             status='AGENT_DECISION_REJECTED', evidence_id=identifier, conflict=conflict.result)
         self.store.add_search_state('PLANNING_TRAINING_FEEDBACK', self._planning_last_measured_feedback)
 
+    def validate_measurement_configuration(self, parent, trial):
+        from search.measurement_review import structural_validation_key
+        key = structural_validation_key(parent, trial, self.backend_identity, self.domains,
+            self.topology.num_gpus, self.constraint_implementation)
+        existing = self.store.connection.execute(
+            "SELECT document FROM search_state_repository WHERE kind='PLANNING_NATIVE_CONFIGURATION_VALIDATION' "
+            "AND json_extract(document,'$.validation_key')=? ORDER BY sequence DESC LIMIT 1", (key,)).fetchone()
+        if existing is not None:
+            return json.loads(existing[0])
+        self.require_fixed_training_semantics(parent['plan']['backend_config'], trial['plan']['backend_config'])
+        self.rewriter.candidate(trial['plan']['backend_config'])
+        document = dict(validation_key=key, status='PASS',
+            scope='backend_structural_legality_and_fixed_training_configuration',
+            parent_trial_id=parent['trial_id'], candidate_plan_hash=trial['plan_hash'],
+            backend_capability_source_hashes=self.backend_identity)
+        identifier = fingerprint(document)
+        self.store.add_evidence(identifier, 'PREDICTED', document)
+        document['evidence_id'] = identifier
+        self.store.add_search_state('PLANNING_NATIVE_CONFIGURATION_VALIDATION', document)
+        return document
+
     def review_measurement_candidates(self, parent, candidates, benchmark_ids, profiles, load_ids, round_index):
         profile_trials = {trial_id for row in profiles for trial_id in row['trial_ids']}
         catalog = []
         for row in candidates:
             identifier, prediction = row['trial_id'], row['prediction']
-            self.require_fixed_training_semantics(parent['plan']['backend_config'],row['plan']['backend_config'])
-            self.rewriter.candidate(row['plan']['backend_config'])
+            native = self.validate_measurement_configuration(parent, row)
             actions = ['DEFER']
             actions.extend(action for action, ids in (('BENCHMARK', benchmark_ids),
                 ('PROFILE', profile_trials), ('LOAD_VALIDATE', load_ids)) if identifier in ids)
             catalog.append(dict(trial_id=identifier, prediction_evidence_id=prediction['prediction_id'],
                 prediction_status=prediction['prediction_status'], memory_admission=prediction['memory']['admission'],
-                native_configuration_validation=dict(status='PASS',
-                    scope='backend_structural_legality_and_fixed_training_configuration',
-                    parent_trial_id=parent['trial_id'],candidate_plan_hash=row['plan_hash'],
-                    backend_capability_source_hashes=self.backend_identity,
-                    load_validation=self.load_validation_summary(row)),
+                native_configuration_validation=dict(native, load_validation=self.load_validation_summary(row)),
                 same_plan_calibration=prediction['evidence'].get('native_calibration_admission'),
                 allowed_actions=actions))
-        key = fingerprint(dict(round_index=round_index, catalog=catalog))
-        checkpoint = (self.store.get_round(round_index) or {}) if round_index is not None else {}
-        saved = (checkpoint.get('candidate_reviews') or {}).get(key)
-        if saved is not None:
-            return saved
-        decision, evidence_id = self.invoke_with_tools('ConstraintValidationAgent',
-            '逐项审查candidate_review_catalog中的全部候选，提交真实预测编号、预测状态、逐卡显存状态，'
-            '从每项allowed_actions推荐下一项操作并说明原因。实测同配置校准的时间不属于独立DAG预测。',
-            dict(parent_trial_id=parent['trial_id'], candidate_review_catalog=catalog,
-                candidate_ids=[row['trial_id'] for row in catalog],
-                candidates=self.investigation_candidate_table(candidates)), CandidateReview)
-        result = dict(evidence_id=evidence_id, **decision.model_dump(mode='json'))
+        for row in candidates:
+            if row['trial_id'] in benchmark_ids:
+                reason = self.planning_benchmark_rejection(row, self.planning_leader_rate(), {row['plan_hash']})
+                if reason is not None:
+                    raise ValueError(dict(candidate_id=row['trial_id'], formal_admission_rejected=reason))
+        from search.measurement_review import native_review_binding
+        binding = dict(native_review_binding(catalog), round_index=round_index,
+            formal_measurement_gate=self.formal_measurement_gate(parent))
+        evidence_id = fingerprint(binding)
+        self.store.add_evidence(evidence_id, 'PREDICTED', binding)
+        result = dict(evidence_id=evidence_id, **binding)
         self.store.add_search_state('PLANNING_CANDIDATE_REVIEW', result)
         if round_index is not None:
+            checkpoint = self.store.get_round(round_index) or {}
+            key = fingerprint(dict(round_index=round_index, catalog=catalog))
             self.store.save_round(round_index, candidate_reviews=(checkpoint.get('candidate_reviews') or {}) | {key: result})
         return result
 
@@ -7147,9 +7168,7 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
             for row in candidates:
                 identifier = row['trial_id']
                 if row['plan_hash'] not in native_checked:
-                    request = row['plan']['backend_config']
-                    self.require_fixed_training_semantics(parent['plan']['backend_config'], request)
-                    self.rewriter.candidate(request)
+                    self.validate_measurement_configuration(parent, row)
                     native_checked.add(row['plan_hash'])
                 if reason := self.planning_benchmark_rejection(row, best, native_checked):
                     benchmark_ids.discard(identifier)
@@ -7214,22 +7233,12 @@ class EvidenceGuidedSearch(InvestigationControl, JointPlanning):
                 and row['prediction']['memory'].get('admission') == 'REQUIRE_MEMORY_PROFILE'
                 and self.load_validation_summary(row) is None
                 and row['plan_hash'] in native_checked}
-            try:
-                review = self.review_measurement_candidates(parent, candidates, benchmark_ids, profiles, load_ids, round_index)
-            except AgentConstraintConflict as conflict:
-                self.record_rejected_measurement_decision(round_index, action_ids, conflict)
-                return []
-            recommended = {item['trial_id']: item['recommended_action']
-                for item in review['candidate_verifications']}
-            withheld = {identifier for identifier in benchmark_ids if recommended[identifier] != 'BENCHMARK'}
-            benchmark_ids -= withheld
-            prediction_gate.update({identifier: 'CANDIDATE_REVIEW_WITHHELD' for identifier in withheld})
+            review = self.review_measurement_candidates(parent, candidates, benchmark_ids, profiles, load_ids, round_index)
             approved = [dict(candidate_id=row['trial_id'], plan_hash=row['plan_hash'])
                 for row in candidates if row['trial_id'] in benchmark_ids]
             if approved:
                 self.store.add_search_state('PLANNING_VALIDATED_CANDIDATES', dict(round_index=round_index,
                     validation_evidence_id=review['evidence_id'], candidates=approved))
-            load_ids = {identifier for identifier in load_ids if recommended[identifier] == 'LOAD_VALIDATE'}
             stops = ['RECHECK_NEXT_ROUND','NO_IMPROVEMENT_WORTH_TESTING']
             if not profiles and not benchmark_ids and not load_ids:
                 stops.append('NO_EXECUTABLE_MEASUREMENT')

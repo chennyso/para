@@ -1,5 +1,7 @@
 httpx[socks]>=0.28,<1
 ijson
+jsonref
+jsonschema
 matplotlib
 joblib
 numpy
