@@ -62,7 +62,7 @@ def configuration(request):
              'fsdp_double_buffer', 'fsdp_bucket_elements', 'checkpoint_format', 'checkpoint_reshard',
              'optimizer_checkpoint_mode', 'main_grads_dtype', 'grad_comm_dtype',
              'main_params_dtype', 'exp_avg_dtype', 'exp_avg_sq_dtype',
-             'overlap_grad_reduce', 'pad_buckets_for_high_nccl_busbw',
+             'overlap_grad_reduce', 'overlap_param_gather', 'pad_buckets_for_high_nccl_busbw',
              'optimizer_offload_fraction', 'optimizer_transfer_overlap',
              'clip_grad', 'num_distributed_optimizer_instances',
              'position_embedding_group_policy')

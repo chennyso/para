@@ -33,6 +33,8 @@ def schedule_change(parent, candidate):
     changed = {field for field in left.keys() | right.keys() if left.get(field) != right.get(field)}
     if changed == {'group'}:
         return 'group', right['group']
+    if changed == {'batch_p2p_comm'}:
+        return 'batch_p2p_comm', right['batch_p2p_comm']
     if 'overlap_p2p' in changed and changed <= {'overlap_p2p', 'batch_p2p_comm'}:
         return 'overlap_p2p', right['overlap_p2p']
     return None
@@ -41,11 +43,13 @@ def schedule_change(parent, candidate):
 def coordinate_axes(parent, candidate):
     left, right = effective_schedule_execution(parent), effective_schedule_execution(candidate)
     fields = ('tp', 'pp', 'cp', 'ep', 'etp', 'dp', 'vpp', 'micro_batch', 'group',
-        'decoder_chunks', 'recompute', 'overlap_p2p', 'overlap_grad_reduce', 'overlap_param_gather',
+        'decoder_chunks', 'recompute', 'overlap_p2p', 'batch_p2p_comm', 'overlap_grad_reduce', 'overlap_param_gather',
         'bucket_elements', 'rank_mapping',
         'execution_backend', 'optimizer_sharding', 'optimizer_offload_fraction',
         'precision_aware_optimizer', 'memory_policy')
     changed = {key for key in fields if left.get(key) != right.get(key)}
+    if 'overlap_p2p' in changed and right['batch_p2p_comm'] == (not right['overlap_p2p']):
+        changed.discard('batch_p2p_comm')
     if changed.intersection({'tp', 'pp', 'cp'}):
         changed.discard('dp')
     if 'tp' in changed and right['execution_backend'] == 'megatron_ddp' and right['etp'] == right['tp']:
@@ -80,6 +84,11 @@ def schedule_control_options(parent, history, groups):
     if ('overlap_p2p', overlap) not in previous:
         options.append(dict(field='overlap_p2p', from_value=not overlap, to_value=overlap,
             effect='keeps_compute_order_changes_p2p_overlap_permission'))
+    if overlap:
+        batch = native_schedule_settings(request)['batch_p2p_comm']
+        if ('batch_p2p_comm', not batch) not in previous:
+            options.append(dict(field='batch_p2p_comm', from_value=batch, to_value=not batch,
+                effect='keeps_compute_order_changes_native_p2p_dispatch'))
     legal = [value for value in groups if value != current and total % value == 0
         and valid_microbatch_group(total, pp, vpp, value) and ('group', value) not in previous]
     for value in sorted(legal, key=lambda item: (abs(item - current), item))[:2]:

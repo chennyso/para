@@ -631,6 +631,12 @@ class TopologyAwareNCCLCostSurface:
                     if curve.sizes[0] <= payload_bytes <= curve.sizes[-1]
                     else curve.extrapolate(payload_bytes, benchmark['hardware_fingerprint']))
                 estimate.update(evidence_id=profile['id'], concurrent_operations=list(concurrency))
+                if estimate['status']=='ANALYTICAL_CURVE_EXTRAPOLATED':
+                    identity = dict(collective=collective,physical_ranks=list(ranks),
+                        payload_bytes=payload_bytes,dtype=dtype,concurrent_operations=list(concurrency))
+                    target = dict(kind='nccl',cost_key=fingerprint(identity),identity=identity,
+                        reason='目标消息大小超出同一物理进程组的实测范围，需要实际消息采样')
+                    estimate.update(profiling_request=target,profiling_targets=[target])
                 estimate['concurrency_context'] = rows[0].get('concurrency_context',
                     benchmark.get('concurrency_context'))
                 estimate['source_plan_signature'] = benchmark.get('source_plan_signature')
@@ -683,6 +689,12 @@ class TopologyAwareNCCLCostSurface:
                         calibration_domain='same_cluster_group_size_node_and_numa_distribution',
                         assumptions=['复用相同节点分布与NUMA分布类别的实测NCCL分段曲线',
                             '动态资源Replay使用候选实际Node类别资源身份计算并发带宽共享'])
+                    if status=='ANALYTICAL_TOPOLOGY_CLASS_EXTRAPOLATED':
+                        identity = dict(collective=collective,physical_ranks=list(ranks),
+                            payload_bytes=payload_bytes,dtype=dtype,concurrent_operations=list(concurrency))
+                        target = dict(kind='nccl',cost_key=fingerprint(identity),identity=identity,
+                            reason='目标消息大小超出拓扑类别的实测范围，需要实际消息及进程组采样')
+                        estimate.update(profiling_request=target,profiling_targets=[target])
                     estimate['concurrency_context'] = rows[0].get('concurrency_context',
                         benchmark.get('concurrency_context'))
                     estimate['communication_phases'] = [dict(phase_id='phase:0',

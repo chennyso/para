@@ -15,6 +15,7 @@ from search.seed_planner import SeedPlanner
 from search.module_relations import owner_patterns, prefix_support, validate_relations
 from validation.parallel_validator import validate_candidate
 from search.continuation import ContinuationGuide
+from search.complete_partition import CompletePartitionSearch
 from scheduling.native_microbatches import valid_microbatch_group
 
 
@@ -25,7 +26,7 @@ STATE_FIELDS = tuple(name for name in SeedPlanner.family_fields() if name not in
 REWRITE_FIELDS = GLOBAL_FIELDS + LAYOUT_FIELDS + STATE_FIELDS + (
     'fsdp_sharding_strategy', 'fsdp_unit', 'fsdp_prefetch', 'fsdp_prefetch_distance',
     'fsdp_reshard_after_forward', 'fsdp_double_buffer', 'fsdp_bucket_elements', 'bucket_elements',
-    'optimizer_pin_cpu_params', 'memory_policy')
+    'optimizer_pin_cpu_params', 'memory_policy', 'batch_p2p_comm', 'overlap_grad_reduce', 'overlap_param_gather')
 COMPUTE_FIELDS = ('model', 'checkpoint', 'tp', 'cp', 'ep', 'etp', 'micro_batch', 'memory_policy',
     'sequence', 'precision', 'pipeline_dtype', 'recompute', 'attention_backend',
     'sequence_parallel', 'backend_fingerprint', 'hardware_fingerprint',
@@ -45,6 +46,7 @@ class PartitionState:
     stage_forward_ms: tuple | None
     stage_backward_ms: tuple | None
     stage_state_bytes: tuple | None
+    boundary_certificate_id: str | None = None
 
     def metrics(self):
         if self.stage_forward_ms is None or self.stage_state_bytes is None:
@@ -52,9 +54,13 @@ class PartitionState:
         return self.stage_forward_ms + self.stage_backward_ms + self.stage_state_bytes
 
 
-def strictly_dominates(left, right):
+def strictly_dominates(left, right, boundary_index=None):
     if left.boundary != right.boundary or left.resource_signature != right.resource_signature:
         return False
+    if left.boundary_certificate_id is not None or right.boundary_certificate_id is not None:
+        return (boundary_index is not None and left.boundary_certificate_id is not None
+            and right.boundary_certificate_id is not None
+            and boundary_index.dominates(left.boundary_certificate_id,right.boundary_certificate_id))
     first, second = left.metrics(), right.metrics()
     return (first is not None and second is not None
         and len(first) == len(second)
@@ -64,21 +70,45 @@ def strictly_dominates(left, right):
 
 class ConditionalPartitionSolver:
     def __init__(self, rewriter, profiles=(), memory_evaluator=None, backend_source_hashes=None, *,
-                 fair_expansion=True):
+                 fair_expansion=True,boundary_index=None,backend_source_resolver=None):
         self.rewriter = rewriter
         self.profiles = list(profiles)
         self.memory_evaluator = memory_evaluator
         self.backend_source_hashes = backend_source_hashes
+        self.backend_source_resolver = backend_source_resolver
         if type(fair_expansion) is not bool:
             raise ValueError('状态扩展配额开关必须为布尔值')
         self.fair_expansion = fair_expansion
         self.profile_cache = {}
+        self.environment_match_cache = {}
+        self.annotated_profile_cache = {}
+        self.compute_profile_index = {}
+        for profile in self.profiles:
+            normalized = normalized_execution(profile['request'])
+            normalized['precision_aware_optimizer'] = bool(normalized['precision_aware_optimizer'])
+            identity = self._compute_identity(normalized)
+            self.compute_profile_index.setdefault(identity,[]).append(profile)
+        self.boundary_index = boundary_index
+
+    @staticmethod
+    def _compute_identity(execution):
+        return fingerprint({key:execution.get(key) for key in COMPUTE_FIELDS
+            if key not in ('backend_fingerprint','hardware_fingerprint')})
 
     def _environment_matches(self, profile):
+        # 求解器固定使用当前成本记录与源码身份，环境校验按记录复用。
+        identity = id(profile)
+        if identity not in self.environment_match_cache:
+            self.environment_match_cache[identity] = self._validate_environment(profile)
+        return self.environment_match_cache[identity]
+
+    def _validate_environment(self, profile):
         topology = self.rewriter.topology
         if not topology.devices or not topology.software or not profile.get('hardware'):
             return False
-        if self.backend_source_hashes is None or profile.get('source_hashes') != self.backend_source_hashes:
+        expected_sources = (self.backend_source_hashes if self.backend_source_resolver is None
+            else self.backend_source_resolver(profile))
+        if expected_sources is None or profile.get('source_hashes') != expected_sources:
             return False
         actual = {str(device.get('uuid', device.get('gpu_uuid'))).removeprefix('GPU-').lower()
             for device in topology.devices}
@@ -97,27 +127,26 @@ class ConditionalPartitionSolver:
                 return False
         return True
 
-    def _profile(self, request):
+    def _profile(self, request, *, include_state=True):
         target = normalized_execution(request)
         target['precision_aware_optimizer'] = bool(target['precision_aware_optimizer'])
         cache_key = fingerprint(dict(execution=plan_signature(request),
             compute={key: target.get(key) for key in COMPUTE_FIELDS},
-            state_dtypes={key: request.get(key) for key in STATE_DTYPE_FIELDS}))
+            state_dtypes={key: request.get(key) for key in STATE_DTYPE_FIELDS}, include_state=include_state))
         if cache_key in self.profile_cache:
             return self.profile_cache[cache_key]
-        def comparable(row):
-            previous = normalized_execution(row['request'])
-            previous['precision_aware_optimizer'] = bool(previous['precision_aware_optimizer'])
-            return all(previous.get(key) == target.get(key) for key in COMPUTE_FIELDS
-                if key not in ('backend_fingerprint', 'hardware_fingerprint'))
-        matched = [row for row in self.profiles if self._environment_matches(row) and comparable(row)
+        comparable = self.compute_profile_index.get(self._compute_identity(target),())
+        matched = [row for row in comparable if self._environment_matches(row)
             and backend_reuse_evidence(request, row)['status'] != 'MISMATCHED']
         matched = [row for row in matched if set(map(int, row['layers']))
             == set(range(self.rewriter.model.num_layers))]
         if not matched:
             self.profile_cache[cache_key] = None
             return None
-        matched = [annotate_measurement_semantics(item) for item in matched]
+        for item in matched:
+            if id(item) not in self.annotated_profile_cache:
+                self.annotated_profile_cache[id(item)] = annotate_measurement_semantics(item)
+        matched = [self.annotated_profile_cache[id(item)] for item in matched]
         row = max(matched, key=lambda item: (
             same_training_plan(item['request'], request),
             *compute_profile_quality(item),
@@ -127,7 +156,8 @@ class ConditionalPartitionSolver:
             for field in ('forward_ms', 'backward_ms', 'state_bytes'):
                 if field not in cost or not math.isfinite(cost[field]) or cost[field] < 0:
                     raise ValueError('条件化分区需要有效的逐层实测计算与状态成本')
-        row = self._target_state_costs(row, request)
+        if include_state:
+            row = self._target_state_costs(row, request)
         self.profile_cache[cache_key] = row
         return row
 
@@ -142,6 +172,7 @@ class ConditionalPartitionSolver:
         if self.rewriter.model.num_experts and not row.get('module_expert_ownership_labeled'):
             missing.append('module_expert_ownership_labels')
         row['partition_state_bytes'] = None
+        row['partition_parameter_bytes_by_rank'] = None
         row['partition_state_evidence'] = dict(status='UNKNOWN' if missing else 'MODELED_FROM_PARAMETER_OWNERSHIP',
             missing=missing, source_profile_id=profile['id'], target_plan_signature=plan_signature(request),
             target_state_dtypes={key: request.get(key) for key in STATE_DTYPE_FIELDS},
@@ -150,13 +181,20 @@ class ConditionalPartitionSolver:
             return row
         config = configuration(request)
         state_bytes = {}
+        parameter_bytes = {}
         for layer, elements in row['module_parameters'].items():
             counts = {family: {rank: elements[family] for rank in range(config.world_size)}
                 for family in ('dense', 'expert')}
             states = parameter_state_ownership(counts, config, request)
             # 模块可放入任一物理阶段，保留所有Rank中的最大参数状态量。
             state_bytes[layer] = max(item['gpu_persistent_bytes'] for item in states.values())
+            if (not self.rewriter.model.num_experts
+                    and request.get('execution_backend', 'megatron_ddp') == 'megatron_ddp'):
+                parameter_bytes[layer] = {rank: sum(
+                    item['components'][family]['persistent_parameter_bytes'] for family in ('dense', 'expert'))
+                    for rank, item in states.items()}
         row['partition_state_bytes'] = state_bytes
+        row['partition_parameter_bytes_by_rank'] = parameter_bytes or None
         return row
 
     def _layouts(self, parent, global_values, fixed, allowed_ranges):
@@ -206,7 +244,12 @@ class ConditionalPartitionSolver:
                     request = dict(base, **state, vpp=vpp, micro_batch=micro_batch,
                         recompute=recompute, group=group, pipeline_schedule=schedule,
                         overlap_p2p=overlap)
+                    if overlap != parent.get('overlap_p2p', False):
+                        request.pop('batch_p2p_comm', None)
+                        request.pop('overlap_p2p_comm_warmup_flush', None)
                     request.update(extra)
+                    if 'batch_p2p_comm' in extra:
+                        request['record_native_schedule'] = True
                     if any(request.get(key) != value for key, value in fixed.items()
                             if key != 'decoder_chunks'):
                         continue
@@ -351,14 +394,20 @@ class ConditionalPartitionSolver:
                     resource = (counts, tuple(request.get('rank_mapping', range(self.rewriter.topology.num_gpus))),
                         tuple((key, str(request.get(key))) for key in STATE_FIELDS),
                         request['group'], request['recompute'], request['overlap_p2p'])
-                    candidate = PartitionState(end, counts, boundary, resource, *costs)
+                    certificate = (None if self.boundary_index is None else
+                        self.boundary_index.certify(request,counts,relations=module_relations))
+                    if certificate is not None:
+                        resource = ('complete_native_suffix_domain',certificate.boundary_identity)
+                    candidate = PartitionState(end,counts,boundary,resource,*costs,
+                        None if certificate is None else certificate.identifier)
                     bucket = generated.setdefault(boundary, [])
                     if any(existing == candidate for existing in bucket):
                         continue
-                    if any(strictly_dominates(existing, candidate) for existing in bucket):
+                    if any(strictly_dominates(existing,candidate,self.boundary_index) for existing in bucket):
                         dominated += 1
                         continue
-                    survivors = [existing for existing in bucket if not strictly_dominates(candidate, existing)]
+                    survivors = [existing for existing in bucket
+                        if not strictly_dominates(candidate,existing,self.boundary_index)]
                     dominated += len(bucket) - len(survivors)
                     generated[boundary] = survivors + [candidate]
                 if stage_expansions >= allowance:
@@ -384,6 +433,8 @@ class ConditionalPartitionSolver:
         if continuation is not None:
             for row in continuation.completed(request):
                 counts = tuple(row['decoder_chunks'])
+                if self.boundary_index is not None and self.boundary_index.prunes_completion(request,counts):
+                    continue
                 costs = [None, None, None]
                 if prefixes is not None:
                     costs = [[0.0] * pp if index < len(prefixes) else None for index in range(3)]
@@ -423,7 +474,8 @@ class ConditionalPartitionSolver:
     def solve(self, parent_request, global_values, evidence_id, *, fixed_values=None,
               limit=8, max_states_per_boundary=16, max_expansions=20000,
               max_layouts=64, compile_graphs=False, allowed_ranges=None, preserve=(), module_relations=(),
-              continuation_requests=(), continuation_evaluator=None, max_continuation_evaluations=0):
+              continuation_requests=(), continuation_evaluator=None, max_continuation_evaluations=0,
+              timed_path_reference=None):
         for value in (limit, max_states_per_boundary, max_expansions, max_layouts):
             if type(value) is not int or value < 1:
                 raise ValueError('条件化分区的候选和计算预算必须为正整数')
@@ -553,6 +605,7 @@ class ConditionalPartitionSolver:
             result['termination'].append('LAYOUT_BUDGET')
         buckets = []
         missing = {}
+        timed_path_used = False
         for index, request in enumerate(layouts):
             slots = request['pp'] * request['vpp']
             relations = validate_relations(module_relations, self.rewriter.model.num_layers, slots)
@@ -573,6 +626,7 @@ class ConditionalPartitionSolver:
             if not patterns_complete:
                 result['termination'].append('MODULE_PATTERN_BUDGET')
             pattern_buckets = []
+            path_candidates = {}
             statistics = dict(expansions=0, strictly_dominated=0, relation_rejected=0, truncated=False)
             for pattern_index, pattern in enumerate(patterns):
                 remaining_budget = budget - statistics['expansions']
@@ -584,6 +638,26 @@ class ConditionalPartitionSolver:
                 conditioned.extend(ModuleRelation(relation='allowed_virtual', module_ids=[module],
                     virtual_slots=[owner], evidence_refs=evidence_refs,
                     rationale='原始模块关系满足的联合归属组合') for module, owner in pattern)
+                if (timed_path_reference is not None and not timed_path_used and profile is not None
+                        and remaining_budget > slots and 'decoder_chunks' not in fixed
+                        and 'decoder_chunks' not in allowed_ranges
+                        and signature(timed_path_reference['request']) == signature(request)):
+                    timed_path_used = True
+                    reference = timed_path_reference['request']
+                    reference_key = plan_signature(reference)
+                    path = CompletePartitionSearch(self.rewriter.model.num_layers, request, profile,
+                        tuple(conditioned[len(relations):]), timed_path_reference['evaluate'],
+                        timed_path_reference['deadline'], [reference],
+                        {reference_key: timed_path_reference['prediction']['performance']['step_time_ms']},
+                        reports={reference_key: timed_path_reference['prediction']},
+                        graph_loader=timed_path_reference['load_graph'], engine='path').run(1, 1)
+                    result['dag_partition_search'] = path
+                    statistics['expansions'] += path['expansions']
+                    remaining_budget -= path['expansions']
+                    for record in path['candidates']:
+                        counts = tuple(record['decoder_chunks'])
+                        if prefix_support(counts, self.rewriter.model.num_layers, request['pp'], request['vpp'], relations):
+                            path_candidates[counts] = record
                 generated, current = self._partition(request, profile, max_states_per_boundary,
                     max(slots, remaining_budget // (len(patterns) - pattern_index)),
                     request['decoder_chunks'] if 'decoder_chunks' in allowed_ranges
@@ -596,6 +670,12 @@ class ConditionalPartitionSolver:
             states = [state for group in zip_longest(*pattern_buckets)
                       for state in group if state is not None]
             states = list({state.counts: state for state in states}.values())
+            present = {state.counts for state in states}
+            for counts in sorted(path_candidates.keys() - present):
+                states.append(PartitionState(sum(counts), counts,
+                    self._boundary(request, len(counts), sum(counts)),
+                    ('timed_dag_cp_sat', signature(request), counts), None, None, None))
+            states.sort(key=lambda state: state.counts not in path_candidates)
             result['counters']['layouts'] += 1
             for name in ('expansions', 'strictly_dominated', 'relation_rejected'):
                 result['counters'][name] += statistics[name]
@@ -620,6 +700,7 @@ class ConditionalPartitionSolver:
                     module_owner_patterns=[list(pattern) for pattern in patterns],
                     module_owner_patterns_complete=patterns_complete,
                     boundary_state=list(state.boundary), resource_signature=fingerprint(state.resource_signature),
+                    boundary_certificate_id=state.boundary_certificate_id,
                     stage_forward_ms=state.stage_forward_ms, stage_backward_ms=state.stage_backward_ms,
                     stage_state_bytes=state.stage_state_bytes, compute_profile_id=profile['id'] if profile else None,
                     parameter_state_evidence=None if profile is None else profile.get('partition_state_evidence'),
@@ -628,6 +709,8 @@ class ConditionalPartitionSolver:
                     memory_status='UNKNOWN', execution_validation='native_backend_structural_legality')
                 if continuation is not None:
                     evidence['continuation_witness'] = continuation.witness(request, state.counts)
+                if state.counts in path_candidates:
+                    evidence['dag_cp_sat'] = path_candidates[state.counts]
                 groups = process_groups(candidate_request)
                 evidence['communication_boundary'] = dict(
                     pipeline_payload_shape=[candidate_request['sequence'] // candidate_request['cp'],
@@ -695,4 +778,6 @@ class ConditionalPartitionSolver:
         result['legal_layout_count'] = len(all_layouts)
         if continuation is not None:
             result['continuation_search'] = continuation.report()
+        if self.boundary_index is not None:
+            result['boundary_certificates'] = self.boundary_index.report()
         return result

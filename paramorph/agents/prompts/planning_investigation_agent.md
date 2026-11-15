@@ -16,3 +16,5 @@ model_structure给出后端模块、原始依赖、特殊任务位置及支持�
 tool_requests用于查询既有DAG、成本与历史。完成查询后提交actions并将tool_requests置空。引用真实evidence_ids，输出严格符合调用方Schema。
 
 完整策略权限开放时，可以通过runtime_ranges.group联合调查微批分组、MBS、并行维度和模块布局。分组改变原生任务次序及激活存活。VPP大于1时，PP<=group<=GBS/(DP*MBS)，末尾不足整组的微批数量必须至少为PP。引用实际后端域并检查每项组合，保持全局批大小。根据完整DAG的等待和显存反馈选择后续分组与布局，预测时间和容量证据分别记录。
+
+根据recent_failed_profile_requests的实际配置及CUDA_OOM记录决定保存策略。runtime_ranges.recompute支持none、full、selective-mlp及selective；选择selective时同时提交memory_policy列表，填写recompute_granularity=selective及明确的非空recompute_modules。模块名称来自native_recomputation_options.supported_modules。联合选择微批、并行维度、连续分层与通信重叠，说明如何减少保存对象以及新增重放计算。完整DAG预测和逐Rank容量通过后才申请正式测量。

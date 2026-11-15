@@ -10,6 +10,32 @@ from dataclasses import asdict
 from core_data_models import MemoryPolicy
 from graph.capability_registry import tensor_parallel_limit
 
+
+def prepare_execution_request(request):
+    request = dict(request)
+    if request.get('memory_policy') is not None:
+        request['memory_policy'] = asdict(MemoryPolicy(**request['memory_policy']))
+    if request.get('execution_backend') == 'megatron_fsdp':
+        request.setdefault('load_hf_weights', request.get('initialization') != 'random')
+    return request
+
+
+def profile_source_paths(request, numerical=False):
+    root = Path(__file__).resolve().parents[1]
+    sources = {'paramorph_runtime.py': root / 'runtime.py',
+        'paramorph_communication_calibration.py': root / 'communication_calibration.py'}
+    if request.get('paramorph_fsdp_component_services'):
+        sources['paramorph_runtime_base.py'] = root / 'runtime.py'
+        sources['paramorph_runtime.py'] = root / 'fsdp_component_runtime.py'
+    if numerical:
+        sources['numerical_reference.py'] = root / 'numerical_reference.py'
+    if request.get('paramorph_memory_audit', False):
+        sources['memory_audit.py'] = root / 'memory_audit.py'
+    if request.get('paramorph_operator_calibration', False):
+        sources['operator_profiling.py'] = root / 'operator_profiling.py'
+    return sources
+
+
 class MegatronAdapter:
     def __init__(self, config):
         self.config = config
@@ -133,17 +159,12 @@ class MegatronAdapter:
             raise ValueError(f'实际训练的Tensor并行度必须满足1≤TP≤{maximum_tp}')
         if not self.nodes:
             self.preflight()
-        request = dict(request)
-        if request.get('memory_policy') is not None:
-            request['memory_policy'] = asdict(MemoryPolicy(**request['memory_policy']))
+        request = prepare_execution_request(request)
         if (request.get('validation_mode') is None
                 and self.config.request.get('max_allocation_seconds') is not None):
             request['max_allocation_seconds'] = min(
                 request.get('max_allocation_seconds', self.config.request['max_allocation_seconds']),
                 self.config.request['max_allocation_seconds'])
-        if request.get('execution_backend') == 'megatron_fsdp':
-            request['load_hf_weights'] = True
-            request['checkpoint_format'] = 'fsdp_dtensor'
         if request.get('nccl_profile'):
             database = self.output / 'experiments.sqlite'
             if database.is_file():
@@ -160,6 +181,10 @@ class MegatronAdapter:
         request['master'] = self.nodes[0]['ip']
         if prediction is not None:
             request['prediction_gate'] = prediction
+            bounds = prediction.get('memory', {}).get('host_cpu_memory_peak_per_rank_bytes', {})
+            world = request['node_count'] * request['gpus_per_node']
+            if set(map(int, bounds)) == set(range(world)) and all(type(value) is int and value >= 0 for value in bounds.values()):
+                request['host_optimizer_lower_bound_per_physical_rank_bytes'] = {str(rank): value for rank, value in bounds.items()}
         if profile:
             request.update(instrumented=True, paramorph=True, paramorph_calibration=True,
                 paramorph_layer_backward_calibration=True, paramorph_link_calibration=True,
@@ -205,15 +230,7 @@ class MegatronAdapter:
             sources['compute_communication_overlap_benchmark.py'] = (
                 self.runner.ROOT / 'experiments' / 'compute_communication_overlap_benchmark.py')
         if profile or numerical or request.get('paramorph', False) or request.get('paramorph_parameter_ledger', False):
-            root = Path(__file__).resolve().parents[1]
-            sources.update({'paramorph_runtime.py': root / 'runtime.py',
-                'paramorph_communication_calibration.py': root / 'communication_calibration.py'})
-            if numerical:
-                sources['numerical_reference.py'] = root / 'numerical_reference.py'
-            if request.get('paramorph_memory_audit', False):
-                sources['memory_audit.py'] = root / 'memory_audit.py'
-            if request.get('paramorph_operator_calibration', False):
-                sources['operator_profiling.py'] = root / 'operator_profiling.py'
+            sources.update(profile_source_paths(request, numerical))
         attempt_id = request['run_id'] + ':' + str(time.time_ns())
         queued_at = time.monotonic()
 

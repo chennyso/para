@@ -15,6 +15,7 @@ from graph.model_graph import read_model
 from predictor.fast_predictor import FastPredictor
 from predictor.measured_modules import optimizer_local_cost_evidence
 from search.physical_stage_master import PartitionDomain
+from search.frontier_pricer import FrontierPricer, PricingPolicy
 from search.physical_stage_search import (
     AgentPricer, DeterministicPricer, JointSearchBudget,
     NativeCompositePricingOracle, PhysicalStageJointSearch, PhysicalStageOracle,
@@ -22,6 +23,8 @@ from search.physical_stage_search import (
 
 
 def prepare(workspace, model_name, directory):
+    if model_name not in ('mimo','qwen14'):
+        raise ValueError('该归档实验入口只接受已有MiMo和Qwen14原生记录；其他模型需要提供对应实际Oracle')
     campaign = workspace / 'outputs' / ('mimo-full-search' if model_name == 'mimo' else 'qwen3-14b-full-search')
     settings = json.loads((campaign / 'system-config.json').read_text())
     frozen_directory = workspace / 'outputs/predictor-measurement-campaign' / f'{model_name}-current-hardware'
@@ -100,47 +103,58 @@ def prepare(workspace, model_name, directory):
     return predictor, rewriter, request
 
 
+def prepare_pricing_oracle(workspace,model_name,directory,radius,pricing_costs='native_composite',decoder_chunks=None):
+    predictor,rewriter,request = prepare(workspace,model_name,directory)
+    if pricing_costs == 'native_composite':
+        identifier = ('paramorph-mimo-optimizer-cost-20261011-r1:raw' if model_name == 'mimo'
+            else 'paramorph-qwen3-14b-tp2pp4-optimizer-cost-20261011-r1:raw')
+        encoded = predictor.database.connection.execute('SELECT document FROM profiles WHERE id=?',(identifier,)).fetchone()
+        if encoded is None:
+            raise ValueError('复合定价需要指定的实际完整家族采集记录')
+        profile = json.loads(encoded[0])
+        request = dict(profile['request'])
+        for field in ('main_grads_dtype','main_params_dtype','exp_avg_dtype','exp_avg_sq_dtype'):
+            request[field] = request.get(field,'float32')
+    if decoder_chunks is not None:
+        request = dict(request,decoder_chunks=decoder_chunks)
+    domain = PartitionDomain.around(request,radius)
+    if pricing_costs == 'native_composite':
+        return NativeCompositePricingOracle(domain,request,predictor,rewriter,directory,profile)
+    if pricing_costs == 'full_projection':
+        return PhysicalStageOracle(domain,request,predictor,rewriter,directory)
+    raise ValueError('定价成本范围没有注册')
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--workspace', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--model-name', choices=('mimo', 'qwen14'), required=True)
-    parser.add_argument('--method', choices=('deterministic', 'agent'), required=True)
+    parser.add_argument('--method', choices=('deterministic', 'agent', 'frontier', 'agent_frontier'), required=True)
     parser.add_argument('--replicate', type=int, default=0)
     parser.add_argument('--radius', type=int, default=2)
     parser.add_argument('--rounds', type=int, default=4)
     parser.add_argument('--column-queries', type=int, default=96)
     parser.add_argument('--complete-evaluations', type=int, default=12)
-    parser.add_argument('--wall-seconds', type=float, default=1200)
+    parser.add_argument('--wall-seconds', type=float)
     parser.add_argument('--provider-source', type=Path)
     parser.add_argument('--agent-model')
     parser.add_argument('--pricing-costs', choices=('full_projection', 'native_composite'), default='native_composite')
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
-    predictor, rewriter, request = prepare(args.workspace, args.model_name, args.output)
-    domain = PartitionDomain.around(request, args.radius)
-    if args.pricing_costs == 'native_composite':
-        identifier = ('paramorph-mimo-optimizer-cost-20261011-r1:raw' if args.model_name == 'mimo'
-            else 'paramorph-qwen3-14b-tp2pp4-optimizer-cost-20261011-r1:raw')
-        encoded = predictor.database.connection.execute('SELECT document FROM profiles WHERE id=?', (identifier,)).fetchone()
-        if encoded is None:
-            raise ValueError('复合定价需要已指定的实际完整家族采集记录')
-        profile = json.loads(encoded[0])
-        request = dict(profile['request'])
-        for field, default in (('main_grads_dtype', 'float32'), ('main_params_dtype', 'float32'),
-                ('exp_avg_dtype', 'float32'), ('exp_avg_sq_dtype', 'float32')):
-            request[field] = request.get(field, default)
-        domain = PartitionDomain.around(request, args.radius)
-        oracle = NativeCompositePricingOracle(domain, request, predictor, rewriter, args.output, profile)
-    else:
-        oracle = PhysicalStageOracle(domain, request, predictor, rewriter, args.output)
-    if args.method == 'agent':
+    oracle = prepare_pricing_oracle(args.workspace,args.model_name,args.output,args.radius,args.pricing_costs)
+    request,domain = oracle.request,oracle.domain
+    if args.method in ('agent', 'agent_frontier'):
         if args.provider_source is None:
             raise ValueError('Agent实验必须提供现有真实Provider代码目录')
         sys.path.insert(0, str(args.provider_source))
         from megatron.core.frontier.agents.provider import CodexJSONProvider
         provider = CodexJSONProvider(args.output / 'agents', model=args.agent_model)
-        pricer = AgentPricer(provider.generate)
+        pricer = (AgentPricer(provider.generate) if args.method == 'agent'
+            else FrontierPricer(generate=provider.generate))
+    elif args.method == 'frontier':
+        pricer = FrontierPricer(PricingPolicy(reason='原生LP价格指导连续区间增量搜索',
+            evidence_refs=[oracle.revision]))
     else:
         pricer = DeterministicPricer()
     budget = JointSearchBudget(column_queries=args.column_queries,

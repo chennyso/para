@@ -5,7 +5,7 @@ from pathlib import Path
 import sqlite3
 
 from agents.evidence_policy import AblationEvidencePolicy
-from contracts import TrainingPlan
+from contracts import RewriteIntent, TrainingPlan
 from core_data_models import HardwareTopology
 from graph.capability_registry import CapabilityRegistry
 from graph.complete_rewrite import CompleteAndRewrite
@@ -26,6 +26,38 @@ def load(path):
 def read_rows(path, statement):
     with sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True) as database:
         return [json.loads(row[0]) for row in database.execute(statement)]
+
+
+def verify_p2p_rewrite(rewriter, request):
+    blocking_request = dict(request, overlap_p2p=False, batch_p2p_comm=True,
+        overlap_p2p_comm_warmup_flush=False)
+    overlap_intent = RewriteIntent(operation='JointTransform',
+        values=dict(overlap_p2p=True, batch_p2p_comm=False), adjustable=[], preserve=[],
+        hypothesis='核验真实训练配置的P2P变换', evidence_refs=[request['run_id']])
+    rewrite, = rewriter.complete_and_rewrite(blocking_request, overlap_intent, limit=1)
+    assert rewrite['request']['overlap_p2p'] and not rewrite['request']['batch_p2p_comm']
+    assert rewrite['graph_delta']['changed_schedule_edges']['removed']
+    try:
+        rewriter.complete(blocking_request, overlap_intent.model_copy(
+            update=dict(values=dict(overlap_p2p=True, batch_p2p_comm=True))), 1)
+    except ValueError as error:
+        assert error.args[0]['status'] == 'CONSTRAINT_CONFLICT'
+        assert any('批量P2P通信' in reason for reason in error.args[0]['conflicts'])
+    else:
+        raise AssertionError('批量P2P与重叠同时启用必须被拒绝')
+
+
+def verify_p2p_run(directory):
+    request = load(directory / 'request.json')
+    for node in range(request['node_count']):
+        receipt = load(directory / f'node{node}.exit.json')
+        assert receipt['status'] == 'complete' and receipt['returncode'] == 0
+    model, structure = read_model(Path(request['model']) / 'config.json')
+    world = request['node_count'] * request['gpus_per_node']
+    topology = HardwareTopology(world, request['node_count'], request['gpus_per_node'], 31.84)
+    registry = CapabilityRegistry(structure['module_structure'])
+    domains = registry.parallel_domains(model, topology, request)
+    verify_p2p_rewrite(CompleteAndRewrite(model, topology, registry, domains), request)
 
 
 def verify_resume(campaign, directory):
@@ -92,6 +124,7 @@ def verify(campaign, archive, output):
     communication = rewriter.compiler.graph_delta(blocking, original)['changed_schedule_edges']
     assert grouping['added'] and grouping['removed']
     assert communication['removed']
+    verify_p2p_rewrite(rewriter, request)
     flushed = rewriter.candidate(dict(request, overlap_p2p_comm_warmup_flush=True))
     flush_delta = rewriter.compiler.graph_delta(original, flushed)['changed_schedule_edges']
     assert flush_delta['removed']

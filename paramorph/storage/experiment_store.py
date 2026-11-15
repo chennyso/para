@@ -25,6 +25,10 @@ class ExperimentStore:
         self.connection.executescript('''
             CREATE TABLE IF NOT EXISTS trials (
                 id TEXT PRIMARY KEY, plan_hash TEXT UNIQUE NOT NULL, document TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS trial_run_id_lookup ON trials(
+                json_extract(document, '$.plan.backend_config.run_id'));
+            CREATE INDEX IF NOT EXISTS measured_trial_lookup ON trials(id)
+                WHERE json_type(document, '$.measurement')='object';
             CREATE TABLE IF NOT EXISTS evidence (
                 id TEXT PRIMARY KEY, kind TEXT NOT NULL, document TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS charges (
@@ -60,10 +64,19 @@ class ExperimentStore:
                         'AGENT_RESPONSE', 'AGENT_RUNTIME_REPLAY', 'PLANNING_INVESTIGATION', 'PLANNING_FEEDBACK',
                         'PLANNING_PORTFOLIO_QUEUE', 'PLANNING_PORTFOLIO_DISPATCH', 'PLANNING_EVALUATION',
                         'PLANNING_EXECUTION_CONTEXT', 'COST_MEASUREMENT_AVAILABLE_TO_AGENT',
+                        'PHYSICAL_STAGE_COST_PROJECTION','PHYSICAL_STAGE_PROGRAM','PHYSICAL_STAGE_PRICING_POLICY',
+                        'SEARCH_CONTROLLER_MIGRATION',
                         'PLANNING_GPU_SELECTION', 'PLANNING_TRAINING_FEEDBACK',
                         'MEASURED_PARENT_COST_CALIBRATION', 'TRAINING_MEMORY_REJECTED',
-                        'CAPACITY_VALIDATION_BEFORE_BENCHMARK',
-                        'COST_REQUEST_DEFERRED_BEFORE_GPU_START', 'GPU_EXECUTION_RECEIPT'):
+                        'CAPACITY_VALIDATION_BEFORE_BENCHMARK', 'CAPACITY_VALIDATION_BEFORE_PROFILE',
+                        'CAPACITY_VALIDATION_FROM_PROFILE',
+                        'COST_REQUEST_DEFERRED_BEFORE_GPU_START', 'GPU_EXECUTION_RECEIPT',
+                        'MEASURED_TP_REGRESSION', 'TRAINING_TP_REGRESSION_EXCLUSION',
+                        'PLANNING_GRAPH_VALIDATION', 'PLANNING_VALIDATED_CANDIDATES',
+                        'PLANNING_CANDIDATE_REVIEW', 'PLANNING_NATIVE_CONFIGURATION_VALIDATION',
+                        'PLANNING_MEASUREMENT_DECISION_REJECTED',
+                        'PLANNING_BENCHMARK_RECHECK', 'CP_FSDP_BENCHMARK_ADMISSION', 'PLANNING_COMPONENT_PRIORITIES',
+                        'PREVIOUS_ROUND_CHECKPOINT', 'PLANNING_REJECTED_PROPOSALS'):
             raise ValueError('Search State Repository记录类型未注册')
         encoded = json.dumps(document, sort_keys=True, allow_nan=False)
         identifier = fingerprint(dict(kind=kind, document=document))
@@ -160,8 +173,8 @@ class ExperimentStore:
 
     def reserve_gpu_execution_group(self, requests, total_limit, profiling_limit):
         if (not requests or len({row[0] for row in requests}) != len(requests)
-                or not math.isfinite(total_limit) or total_limit <= 0
-                or not math.isfinite(profiling_limit) or profiling_limit < 0
+                or (total_limit is not None and (not math.isfinite(total_limit) or total_limit < 0))
+                or (profiling_limit is not None and (not math.isfinite(profiling_limit) or profiling_limit < 0))
                 or any(category not in ('profiling', 'validation', 'benchmark') or not math.isfinite(hours)
                        or hours <= 0 for _, _, category, hours in requests)):
             raise ValueError('GPU 预留需要唯一身份、有效类别、用量和预算')
@@ -184,10 +197,11 @@ class ExperimentStore:
             pending = dict(self.connection.execute(
                 'SELECT category, SUM(hours) FROM gpu_execution_reservations WHERE active=1 GROUP BY category'))
             usage = self.usage()
-            if usage.get('gpu_hours', 0) + sum(pending.values()) + sum(row[3] for row in fresh) > total_limit + 1e-9:
+            if (total_limit is not None and usage.get('gpu_hours', 0) + sum(pending.values())
+                    + sum(row[3] for row in fresh) > total_limit + 1e-9):
                 return False
             profiling = sum(hours for _, _, category, hours in fresh if category != 'benchmark')
-            if profiling and (usage.get('profiling_gpu_hours', 0)
+            if profiling_limit is not None and profiling and (usage.get('profiling_gpu_hours', 0)
                     + pending.get('validation', 0) + pending.get('profiling', 0) + profiling > profiling_limit + 1e-9):
                 return False
             self.connection.executemany('INSERT INTO gpu_execution_reservations VALUES (?, ?, ?, ?, 1) '
@@ -264,7 +278,8 @@ class ExperimentStore:
         self.connection.execute('INSERT INTO search_sessions VALUES (?, ?) '
             'ON CONFLICT(id) DO UPDATE SET elapsed_seconds=MAX(elapsed_seconds, excluded.elapsed_seconds)',
             (session, elapsed))
-        completed = [row['trial_id'] for row in self.trials() if row.get('measurement') is not None]
+        completed = [row[0] for row in self.connection.execute(
+            "SELECT id FROM trials WHERE json_type(document, '$.measurement')='object' ORDER BY rowid")]
         document = dict(at_utc=datetime.now(timezone.utc).isoformat(),
             elapsed_seconds=self.search_seconds(), actual_usage=self.usage(),
             completed_trial_ids=completed, timing_scope='actual_search_sessions_including_agent_and_tools')
@@ -360,6 +375,15 @@ class ExperimentStore:
     def trials(self):
         return [json.loads(row[0]) for row in self.connection.execute('SELECT document FROM trials ORDER BY rowid')]
 
+    def trial(self, identifier):
+        row = self.connection.execute('SELECT document FROM trials WHERE id=?',(identifier,)).fetchone()
+        return None if row is None else json.loads(row[0])
+
+    def trial_for_run(self, run_id):
+        row = self.connection.execute("SELECT document FROM trials WHERE json_extract(document, "
+            "'$.plan.backend_config.run_id') IS ? ORDER BY rowid LIMIT 1",(run_id,)).fetchone()
+        return None if row is None else json.loads(row[0])
+
     def put_profile_request(self, request):
         from contracts import ProfilingRequest
         from predictor.profile_database import normalized_execution
@@ -415,6 +439,7 @@ class ExperimentStore:
     def best_measured(self):
         eligible = [row for row in self.trials() if row['measurement'] and row['measurement']['status'] == 'PASS'
             and row['measurement'].get('performance_eligible', False)
+            and math.isfinite(row['measurement']['tokens_per_second']) and row['measurement']['tokens_per_second'] > 0
             and (row.get('measurement_reuse') or {}).get('status') != 'HISTORICAL_AS_RUN_ALIAS']
         return max(eligible, key=lambda row: row['measurement']['tokens_per_second'], default=None)
 

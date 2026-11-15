@@ -11,6 +11,7 @@ import psutil
 import torch
 from torch.distributed.checkpoint.filesystem import FileSystemReader
 from torch.distributed.checkpoint.planner import LoadItemType
+from host_memory_admission import GIB, cgroup_working_set_limit, host_memory_snapshot
 
 
 def install_checkpoint_io_guard(output, request):
@@ -26,7 +27,8 @@ def install_checkpoint_io_guard(output, request):
         if physical_node not in ('g5', 'g6'):
             raise ValueError('分Pod检查点读取需要已确认的物理节点')
         lock_path = output / ('checkpoint-io-' + physical_node + '.lock')
-    timeout = float(request.get('max_allocation_seconds', 600))
+    configured_timeout = request.get('max_allocation_seconds', 600)
+    timeout = -1 if configured_timeout is None else float(configured_timeout)
 
     def read_data(reader, plan, planner):
         rank = torch.distributed.get_rank()
@@ -63,7 +65,8 @@ def install_checkpoint_io_guard(output, request):
             optimizer_state_items=len(optimizer_keys), tensor_samples=samples,
             rss_before=process.memory_info().rss, cgroup_before=int(current_path.read_text()),
             advised_bytes=0, status='STARTED', started_at=time.time(), io_readers_per_node=readers,
-            reader_lane=lane)
+            reader_lane=lane, physical_rank=physical_rank, lock_path=str(active_lock),
+            lock_scope='physical_node_shared_pvc' if split_workers else 'worker_local_ipc')
         record_path = output / f'rank{rank}.checkpoint-read.jsonl'
         with record_path.open('a') as stream:
             stream.write(json.dumps(record, ensure_ascii=False) + '\n')
@@ -86,8 +89,19 @@ def install_checkpoint_io_guard(output, request):
         with FileLock(str(active_lock), timeout=timeout):
             record['lock_acquired_at'] = time.time()
             record['status'] = 'ACQUIRED'
+            memory = host_memory_snapshot()
+            largest = max((length for rows in ranges.values() for _, length in rows), default=0)
+            limit = cgroup_working_set_limit(memory['limit_bytes'])
+            record['host_memory_at_read'] = memory
+            record['largest_serialized_item_bytes'] = largest
+            if (memory['node_available_bytes'] < 32 * GIB + largest
+                    or limit is not None and memory['working_set_bytes'] + largest >= limit):
+                record['status'] = 'REJECTED_CAPACITY'
             with record_path.open('a') as stream:
                 stream.write(json.dumps(record, ensure_ascii=False) + '\n')
+            if record['status'] == 'REJECTED_CAPACITY':
+                raise RuntimeError('CHECKPOINT_HOST_MEMORY_ADMISSION: ' + json.dumps(dict(rank=rank,
+                    physical_rank=physical_rank, host_memory=memory, largest_serialized_item_bytes=largest)))
             planner.commit_tensor = commit
             try:
                 future = original(reader, plan, planner)

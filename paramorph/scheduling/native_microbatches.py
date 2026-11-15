@@ -55,4 +55,5 @@ def schedule_delta(before, after):
             for i, (a, b) in enumerate(zip(left['schedule_table'], right['schedule_table'])) if a != b][:8],
         table_lengths=[len(left['schedule_table']), len(right['schedule_table'])],
         overlap_permission_changed=left['overlap_p2p'] != right['overlap_p2p'],
+        p2p_dispatch_changed=left['batch_p2p_comm'] != right['batch_p2p_comm'],
         observed_overlap_ms=None, evidence='native_execution_contract_requires_matched_trace_for_overlap_duration')

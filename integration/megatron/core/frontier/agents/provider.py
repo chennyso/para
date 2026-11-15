@@ -13,8 +13,8 @@ from openai.lib._pydantic import to_strict_json_schema
 
 
 class CodexJSONProvider:
-    def __init__(self, directory, model=None, timeout_seconds=600, base_url=None,
-                 reasoning_effort='medium'):
+    def __init__(self,directory,model=None,timeout_seconds=None,base_url=None,
+                 reasoning_effort='medium',structured_context=False,model_instructions_file=None):
         self.directory = Path(directory).resolve()
         self.model = model
         self.base_url = base_url
@@ -26,6 +26,8 @@ class CodexJSONProvider:
             if address.scheme != 'https' or not address.hostname or address.username or address.password:
                 raise ValueError('Agent服务地址必须使用HTTPS且不得包含凭据')
         self.timeout_seconds = timeout_seconds
+        self.structured_context = structured_context
+        self.model_instructions = '' if model_instructions_file is None else Path(model_instructions_file).read_text()
         self.executable = shutil.which('codex')
         if self.executable is None:
             raise RuntimeError('Codex CLI is required for the configured real LLM provider')
@@ -35,11 +37,6 @@ class CodexJSONProvider:
                  on_usage=None, max_output_tokens=None):
         invocation_started = time.perf_counter()
         specification = to_strict_json_schema(output_type)
-        requested_specification = specification
-        json_text_transport = len(json.dumps(specification)) > 12000
-        if json_text_transport:
-            specification = dict(type='object', properties=dict(json_object=dict(type='string')),
-                required=['json_object'], additionalProperties=False)
         configuration = tomllib.loads((Path(os.environ.get('CODEX_HOME', str(Path.home() / '.codex'))) / 'config.toml').read_text())
         requested_model = self.model or configuration['model']
         prompt = ('Use only the supplied observation and backend query results. '
@@ -48,14 +45,14 @@ class CodexJSONProvider:
                   'and returns their results. Do not invoke external tools, run shell commands, '
                   'access files, edit source code, or invent measurements. '
                   'Return one object matching the output schema.\n'
-                  + instructions + '\n' + json.dumps(observation, ensure_ascii=False, allow_nan=False,
+                  + self.model_instructions+'\n'+instructions + '\n' + json.dumps(observation, ensure_ascii=False, allow_nan=False,
                     separators=(',', ':')))
-        if json_text_transport:
-            prompt += ('\nReturn the complete decision as JSON encoded in the json_object string. '
-                'The decoded decision must match this schema and will be validated by the host:\n'
-                + json.dumps(requested_specification, ensure_ascii=False, separators=(',', ':')))
+        if self.structured_context:
+            prompt = json.dumps(dict(role=role,instructions=self.model_instructions+'\n'+instructions,
+                execution_policy='Use supplied evidence and return the strict native JSON schema. Do not call tools.',
+                observation=observation),ensure_ascii=False,allow_nan=False,separators=(',',':'))
         identity = dict(role=role, prompt=prompt, schema=specification,
-            model=requested_model, base_url=self.base_url)
+            model=requested_model,base_url=self.base_url,structured_context=self.structured_context)
         if self.reasoning_effort != 'medium':
             identity['reasoning_effort'] = self.reasoning_effort
         identifier = hashlib.sha256(json.dumps(identity,
@@ -84,8 +81,7 @@ class CodexJSONProvider:
                     or any(event.get('item', {}).get('type') in ('command_execution', 'mcp_tool_call', 'file_change') for event in events)):
                 raise RuntimeError('existing actual agent response differs from its registered prompt, schema or provenance')
             raw_response = (directory / 'response.json').read_text()
-            output = output_type.model_validate_json(
-                json.loads(raw_response)['json_object'] if json_text_transport else raw_response)
+            output = output_type.model_validate_json(raw_response)
             return output, provenance | dict(replayed_verified_response=True,
                 invocation_seconds=time.perf_counter() - invocation_started,
                 new_llm_seconds=0.0, new_input_tokens=0, new_output_tokens=0)
@@ -143,7 +139,7 @@ class CodexJSONProvider:
                       'base_url': self.base_url,
                       'model_identifier': requested_model, 'model_identifier_source': 'explicit_codex_cli_argument',
                       'reasoning_effort': self.reasoning_effort,
-                      'response_transport': 'json_text' if json_text_transport else 'direct_schema',
+                      'response_transport': 'direct_schema',
                       'prompt_sha256': hashlib.sha256(prompt.encode()).hexdigest(),
                       'usage': completions[0]['usage'], 'elapsed_seconds': time.perf_counter() - started,
                       'response_sha256': hashlib.sha256((directory / 'response.json').read_bytes()).hexdigest()}
@@ -153,6 +149,5 @@ class CodexJSONProvider:
             new_input_tokens=provenance['usage']['input_tokens'],
             new_output_tokens=provenance['usage']['output_tokens'])
         (directory / 'provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
-        output = output_type.model_validate_json(
-            json.loads(raw_response)['json_object'] if json_text_transport else raw_response)
+        output = output_type.model_validate_json(raw_response)
         return output, provenance

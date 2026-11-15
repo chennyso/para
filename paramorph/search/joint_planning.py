@@ -1,10 +1,14 @@
 from copy import deepcopy
 from collections import Counter
 import gzip
+import hashlib
 import json
+from pathlib import Path
 import time
 
+from agents.evidence_policy import AblationEvidencePolicy
 from contracts import RewriteIntent, fingerprint
+from cost.runtime_calibration import configuration
 from graph.complete_rewrite import CompleteAndRewrite
 from graph.bottleneck_analysis import BottleneckGraph, missing_anchor_predictions, replay_shared_cost_scenarios
 from predictor.profile_database import normalized_execution, plan_signature, signature
@@ -16,6 +20,111 @@ from search.policy_frontier import PolicyFrontier
 
 
 class JointPlanning:
+    def native_profile_source_hashes(self,profile):
+        from adapters.megatron_adapter import profile_source_paths
+        paths = self.adapter.runner.runtime_source_paths()
+        paths.update(profile_source_paths(profile['request'],
+            numerical='numerical_reference.py' in profile['source_hashes']))
+        files = tuple((name,str(path),Path(path).stat().st_mtime_ns,Path(path).stat().st_size)
+            for name,path in sorted(paths.items()))
+        cache = getattr(self,'_native_profile_source_cache',None)
+        if cache is None:
+            self._native_profile_source_cache = cache = {}
+        if files not in cache:
+            cache[files] = {name:hashlib.sha256(Path(path).read_bytes()).hexdigest() for name,path in paths.items()}
+        return cache[files]
+
+    def run_frontier_investigation(self,request,reference_report,module_profile,evaluate,
+                                   module_relations,full_evaluations,action_id):
+        from search.frontier_pricer import FrontierPricer
+        from search.module_relations import complete_partition_boundaries,prefix_support
+        from search.physical_stage_master import PartitionDomain
+        from search.physical_stage_search import JointSearchBudget,PhysicalStageJointSearch,PhysicalStageOracle
+        domain = PartitionDomain.around(request,self.config.planning_frontier_radius)
+        if not prefix_support(request['decoder_chunks'],self.model.num_layers,request['pp'],request['vpp'],module_relations):
+            witness = complete_partition_boundaries(domain,{},module_relations)
+            if witness is None:
+                return dict(status='NO_NATIVE_PARTITION_IN_NEIGHBORHOOD',expansions=0,evaluations=[])
+            request = dict(request,decoder_chunks=[b-a for a,b in zip(witness,witness[1:])])
+            reference_report = evaluate(request)
+            domain = PartitionDomain.around(request,self.config.planning_frontier_radius)
+        if reference_report is None or module_profile is None:
+            return dict(status='NEEDS_PROFILE',expansions=0,evaluations=[],
+                reason='当前执行条件缺少完整种子评价或实际模块成本')
+        graph = self.load_prediction_graph(reference_report)
+        if not graph:
+            return dict(status='NEEDS_PROFILE',expansions=0,evaluations=[],
+                prediction_id=reference_report['prediction_id'],
+                profiling_requests=reference_report.get('evidence', {}).get('profiling_requests', []))
+        directory = self.output/'physical-stage-investigations'/action_id/plan_signature(request)
+        prediction_start = self.store.usage().get('cpu_predictions',0)
+
+        def scoped_evaluate(candidate,candidate_graph=None):
+            if self.store.usage().get('cpu_predictions',0)-prediction_start >= full_evaluations:
+                return None
+            return evaluate(candidate,candidate_graph=candidate_graph)
+
+        def projection_observer(candidate,report):
+            identifier = 'frontier-column:'+str(time.time_ns())
+            self.store.charge(identifier+':count','column_cost_projections',1)
+            self.store.charge(identifier+':seconds','column_cost_seconds',report['evaluation_seconds'])
+            self.store.add_search_state('PHYSICAL_STAGE_COST_PROJECTION',dict(action_id=action_id,
+                plan_signature=plan_signature(candidate),prediction=self.persist_prediction_graph(report)))
+
+        def generate(role,instructions,observation,schema):
+            before = self.store.usage().get('agent_calls',0)
+            self.store.add_evidence(observation['pricing_evidence_id'],'PREDICTED',dict(
+                kind='native_lp_pricing_observation',prices=observation['prices'],artifact=observation['pricing_artifact']))
+            metric = dict(context_id=fingerprint(dict(pricing_program=observation)),tool_round=0,
+                current_tool_return_tokens=0,cumulative_tool_return_tokens=0,
+                cumulative_estimated_context_tokens=0,cumulative_actual_input_tokens=0)
+            response,identifier = self.invoke('JointStrategyAgent',instructions,observation,schema,metric)
+            return response,dict(evidence_id=identifier,role='JointStrategyAgent',wire_schema=schema.__name__,
+                actual_provider_calls=self.store.usage().get('agent_calls',0)-before)
+
+        oracle = PhysicalStageOracle(domain,request,self.predictor,self.rewriter,directory,
+            seed_report=dict(reference_report,execution_graph=graph),module_profile=module_profile,
+            complete_evaluator=lambda candidate,compiled:scoped_evaluate(candidate,candidate_graph=compiled),
+            projection_observer=projection_observer,graph_loader=self.load_prediction_graph,
+            module_relations=module_relations)
+        pricer = FrontierPricer(generate=generate,policy_model=self.config.planning_pricing_program_path)
+        budget = JointSearchBudget(column_queries=max(request['pp'],self.config.planning_frontier_column_queries),
+            complete_evaluations=max(1,full_evaluations),rounds=self.config.planning_frontier_lp_rounds,
+            columns_per_round=max(1,24//request['pp']),wall_seconds=None)
+        result = PhysicalStageJointSearch(oracle,pricer,budget).run(action_id)
+        for deferred in result['deferred_cost_requests']:
+            if scoped_evaluate(deferred['request']) is None:
+                break
+        self.store.add_search_state('PHYSICAL_STAGE_PROGRAM',dict(action_id=action_id,
+            policy=None if pricer.policy is None else pricer.policy.model_dump(mode='json'),
+            result=result,artifact=str(directory/'search-result.json')))
+        result.update(status='COMPLETE' if result['stop']=='NO_PROGRESS' else 'SEARCHED_DECLARED_NEIGHBORHOOD',
+            expansions=result['frontier_search']['frontier_states'])
+        return result
+
+    def execution_boundary_index(self):
+        from search.boundary_certificates import ExecutionBoundaryIndex
+        index = getattr(self,'_execution_boundary_index',None)
+        if index is None or index.cost_revision != self.cost_revision:
+            self._execution_boundary_index = index = ExecutionBoundaryIndex(self.cost_revision,
+                fingerprint(dict(hardware=self.hardware_identity,backend=self.backend_identity,
+                    predictor=self.predictor_revision,parameters=self.predictor.projector.parameters)))
+            self._boundary_registered_prediction_ids = set()
+        for trial in self.store.trials():
+            prediction = trial.get('prediction')
+            if (prediction is None or prediction.get('prediction_id') in self._boundary_registered_prediction_ids
+                    or trial['plan'].get('hardware_fingerprint') != fingerprint(self.hardware_identity)
+                    or trial['plan'].get('backend_fingerprint') != fingerprint(self.backend_identity)
+                    or prediction.get('cost_database_revision') != self.cost_revision
+                    or prediction.get('prediction_status') not in ('PREDICTED','PREDICTED_CALIBRATED')
+                    or prediction.get('memory', {}).get('admission') != 'WITHIN_ESTIMATED_CAPACITY'):
+                continue
+            self._boundary_registered_prediction_ids.add(prediction['prediction_id'])
+            graph = self.load_prediction_graph(prediction)
+            if graph is not None:
+                index.register(trial['plan']['backend_config'],dict(prediction,execution_graph=graph))
+        return index
+
     def solve_joint_scope(self, parent_request, family, intent, limit):
         self.synchronize_cost_revision()
         intent = RewriteIntent.model_validate(intent)
@@ -69,7 +178,7 @@ class JointPlanning:
         self._joint_scope_completions[key] = deepcopy(result)
         return result
 
-    def evaluate_planning_request(self, request, parent_request):
+    def evaluate_planning_request(self, request, parent_request,candidate_graph=None):
         self.synchronize_cost_revision()
         self.rewriter.candidate(request)
         parent_context = self.projection_parent_context(parent_request)
@@ -81,9 +190,23 @@ class JointPlanning:
         if key in cache:
             return cache[key]
         self.check_walltime()
-        if self.store.usage().get('cpu_predictions', 0) >= self.config.budget.max_cpu_predictions:
+        if self.store.usage().get('cpu_predictions', 0) >= self.config.budget.cpu_prediction_ceiling:
             return None
-        prediction = self.predict_request(request, parent_request=parent_context)
+        started = time.perf_counter()
+        bound = self.predictor.evaluate_memory_bound(request) if self.predictor.projector is not None else None
+        memory = None if bound is None else bound['memory']
+        if memory is not None and memory['status'] == 'REJECTED_MEMORY_LOWER_BOUND':
+            prediction = self.predictor.needs_profile(request, started, [], persist=False, memory_bound=memory)
+            prediction.update(prediction_status='REJECTED_MEMORY_LOWER_BOUND',
+                validation=dict(status='REJECTED_MEMORY_LOWER_BOUND', backend_supported=True))
+            prediction['performance']['ranking_eligible'] = False
+            prediction['evidence'].update(predictor_revision=self.predictor_revision, profiling_requests=[])
+        else:
+            prediction = self.predict_request(request,candidate_graph=candidate_graph,parent_request=parent_context)
+            prediction['evaluation_seconds'] = time.perf_counter() - started
+        boundary_index = getattr(self,'_execution_boundary_index',None)
+        if boundary_index is not None and boundary_index.cost_revision == self.cost_revision:
+            boundary_index.register(request,prediction)
         prediction = self.persist_prediction_graph(prediction)
         planning_evidence_id = fingerprint(dict(kind='planning_prediction',
             projection_id=prediction['prediction_id'], parent=parent_context,
@@ -186,6 +309,10 @@ class JointPlanning:
             oracle = PhysicalStageOracle(domain, request, self.predictor, self.rewriter, directory)
         else:
             raise ValueError('定价成本范围没有注册')
+        if pricer is None:
+            from search.frontier_pricer import FrontierPricer, PricingPolicy
+            pricer = FrontierPricer(PricingPolicy(reason='完整事件LP价格指导逐虚拟区间扩展',
+                evidence_refs=[oracle.revision]))
         result = PhysicalStageJointSearch(oracle, pricer, budget).run(run_id or request['run_id'])
         self.store.add_evidence(fingerprint(result), 'PREDICTED', result)
         return result
@@ -285,9 +412,10 @@ class JointPlanning:
             (parent_request['model'],))]
         solver = ConditionalPartitionSolver(rewriter, profiles,
             memory_evaluator=self.predictor.evaluate_memory_bound,
-            backend_source_hashes=self.backend_identity)
+            backend_source_hashes=self.backend_identity,boundary_index=self.execution_boundary_index(),
+            backend_source_resolver=self.native_profile_source_hashes)
         replay_limit = int(min(self.config.conditional_partition_max_replays,
-            max(0, self.config.budget.max_cpu_predictions
+            max(0, self.config.budget.cpu_prediction_ceiling
                 - self.store.usage().get('cpu_predictions', 0) - limit)))
         prediction_seconds = 0.0
 
@@ -298,6 +426,21 @@ class JointPlanning:
             prediction_seconds += self.store.usage().get('cpu_seconds', 0.0) - before
             return prediction
 
+        timed_path_reference = None
+        if replay_limit and not AblationEvidencePolicy(self.config.agent_ablation).without_graph:
+            references = [row.get('prediction') for row in self.store.trials()
+                if plan_signature(row['plan']['backend_config']) == plan_signature(parent_request)]
+            prediction = next((row for row in references if row
+                and row.get('cost_database_revision') == self.cost_revision
+                and row.get('performance', {}).get('step_time_ms') is not None), None)
+            remaining = self.config.budget.walltime_ceiling - self.store.search_seconds()
+            if prediction is not None and remaining > 0 and self.load_prediction_graph(prediction):
+                timed_path_reference = dict(request=parent_request, prediction=prediction,
+                    evaluate=evaluate_continuation, load_graph=self.load_prediction_graph,
+                    deadline=time.perf_counter() + min(remaining, self.config.investigation_max_seconds
+                        if self.config.investigation_max_seconds is not None else float('inf')))
+                replay_limit -= 1
+
         result = solver.solve(parent_request, values, evidence_id, fixed_values=fixed, limit=limit,
             allowed_ranges={} if intent is None else intent.allowed_ranges,
             module_relations=() if intent is None else intent.module_relations,
@@ -307,7 +450,7 @@ class JointPlanning:
             max_layouts=self.config.conditional_partition_max_layouts,
             continuation_requests=continuation_requests,
             continuation_evaluator=evaluate_continuation if continuation_requests else None,
-            max_continuation_evaluations=replay_limit)
+            max_continuation_evaluations=replay_limit, timed_path_reference=timed_path_reference)
         if not fixed and (intent is None or (not intent.allowed_ranges and not intent.module_relations)):
             result['scope'] = 'all_family_completions'
         else:
@@ -350,7 +493,7 @@ class JointPlanning:
         return revision
 
     def prepare_joint_candidates(self, parent):
-        remaining = self.config.budget.max_cpu_predictions - int(self.store.usage().get('cpu_predictions', 0))
+        remaining = self.config.budget.cpu_prediction_ceiling - int(self.store.usage().get('cpu_predictions', 0))
         limit = min(max(0, remaining), max(2, self.config.budget.max_candidates_per_round // 2))
         if limit == 0:
             return [], self.family_catalog(parent) | dict(evidence_id=None)
@@ -392,7 +535,7 @@ class JointPlanning:
             result = self.solve_conditional_family(parent['plan']['backend_config'], family,
                 None, min(per_family, limit - len(candidates)))
             for row in result['candidates']:
-                if self.store.usage().get('cpu_predictions', 0) >= self.config.budget.max_cpu_predictions:
+                if self.store.usage().get('cpu_predictions', 0) >= self.config.budget.cpu_prediction_ceiling:
                     break
                 hypothesis = RewriteIntent.model_validate(row['intent'])
                 trial = self.predict_candidate(row, parent, hypothesis)
@@ -436,11 +579,19 @@ class JointPlanning:
             'profiling_requests', []) if row.get('cost_key')}
         path = prediction.get('evidence', {}).get('cost_records_artifact')
         if path:
-            with gzip.open(path, 'rt', encoding='utf-8') as stream:
-                graph = json.load(stream)['execution_graph']
-            if graph is not None:
-                keys.update(component['cost_key'] for task in graph['tasks'].values()
+            metadata = Path(path).stat()
+            identity = (metadata.st_mtime_ns, metadata.st_size)
+            cache = getattr(self, '_artifact_cost_keys', {})
+            cached = cache.get(path)
+            if cached is None or cached['identity'] != identity:
+                with gzip.open(path, 'rt', encoding='utf-8') as stream:
+                    graph = json.load(stream)['execution_graph']
+                graph_keys = frozenset(component['cost_key'] for task in (graph or {}).get('tasks', {}).values()
                     for component in task['metadata'].get('cost_components', []))
+                cached = dict(identity=identity, keys=graph_keys)
+                cache[path] = cached
+                self._artifact_cost_keys = cache
+            keys.update(cached['keys'])
         return keys
 
     def bottleneck_impact(self, trial, task_ids, epsilon=0.1):
@@ -479,6 +630,78 @@ class JointPlanning:
         structural = dict(tasks=tasks, task_count=len(tasks), graph_sha256=graph['graph_sha256'])
         return (BottleneckGraph(structural, evidence_refs=[graph['graph_sha256']]),
             'STRUCTURAL_DAG')
+
+    def planning_component_evidence(self, candidates, profiles):
+        known = sorted((row for row in candidates if row['prediction']['performance'].get('step_time_ms') is not None
+            and row['prediction'].get('execution_graph')),
+            key=lambda row: row['prediction']['performance']['step_time_ms'])[:self.config.ranking_top_k]
+        shared = {row['cost_key']: row for row in self.shared_ranking_probes(known)
+            if row.get('status') == 'AVAILABLE'}
+        cost_ranges = {key: [row['scenarios'][endpoint]['cost_value'] for endpoint in ('low', 'high')]
+            for key, row in shared.items()}
+        for trial in known:
+            for row in self.full_prediction(trial)['evidence'].get('costs', []):
+                value = row.get('milliseconds')
+                spreads = [row[key] for key in ('stddev_ms', 'sampling_stddev_ms', 'uncertainty_ms')
+                    if row.get(key) is not None and row[key] > 0]
+                if value is None or not spreads or not row.get('evidence_ids'):
+                    continue
+                margin = max(spreads)
+                key = (row.get('profiling_request') or {}).get('cost_key') or row.get('cost_key')
+                if key is None:
+                    continue
+                interval = [max(0.0, value - margin), value + margin]
+                prior = cost_ranges.get(key, interval)
+                cost_ranges[key] = [min(prior[0], interval[0]), max(prior[1], interval[1])]
+        components, modeled = {}, {}
+        for trial in candidates:
+            identifier = trial['trial_id']
+            prediction = trial['prediction']
+            needed = {row['cost_key']: row for row in prediction['evidence'].get('profiling_requests', [])
+                if row.get('cost_key') and (row.get('profile_required_occurrence_count')
+                    or row['kind'] == 'native_training_cost_profile')}
+            if not needed:
+                continue
+            graph = self.load_decision_graph(prediction)
+            tasks = (graph or {}).get('tasks', {})
+            by_key = {}
+            for task_id, task in tasks.items():
+                for key in task['metadata'].get('missing_cost_keys', []):
+                    by_key.setdefault(key, []).append(task_id)
+            for key, request in needed.items():
+                item = components.setdefault(key, dict(affected={}, range_ms=cost_ranges.get(key),
+                    ranking_sensitivity=shared.get(key, {}).get('priority_class')))
+                affected = by_key.get(key, request.get('affected_task_ids', []))
+                item['affected'][identifier] = dict(task_count=len(affected), task_ids=affected[:24])
+            if graph and cost_ranges and prediction['performance'].get('step_time_ms') is None:
+                scenarios = BottleneckGraph(graph).replay_bounded_costs(cost_ranges,
+                    config=configuration(trial['plan']['backend_config']),
+                    resource_model=self.predictor.projector.parameters.get('resource_replay', {}))
+                if scenarios['replay_count']:
+                    modeled[identifier] = scenarios
+                    charge = fingerprint(dict(candidate_id=identifier, ranges=cost_ranges,
+                        cost_revision=self.cost_revision))
+                    self.store.charge('partial-range:' + charge, 'counterfactual_replays', scenarios['replay_count'])
+        result = []
+        for profile in profiles:
+            keys = profile['cost_keys']
+            affected = set(profile['trial_ids'])
+            priority = min((shared[key]['priority_class'] for key in keys if key in shared), default=4)
+            for key in keys:
+                affected.update(components.get(key, {}).get('affected', {}))
+                affected.update(shared.get(key, {}).get('affected_candidate_ids', ()))
+            span = {identifier: modeled[identifier]['step_time_scenario_ms'] for identifier in affected
+                if identifier in modeled}
+            duration_range = max((high - low for low, high in span.values()), default=None)
+            result.append(dict(request_id=profile['request_id'], cost_keys=keys,
+                rank_priority=priority, affected_candidate_ids=sorted(affected),
+                affected_per_gpu_hour=len(affected) / profile['estimated_gpu_hours'],
+                joint_scenario_width_ms=duration_range,
+                estimated_gpu_hours=profile['estimated_gpu_hours']))
+        result.sort(key=lambda row: (row['rank_priority'],
+            -(row['joint_scenario_width_ms'] or 0) / row['estimated_gpu_hours'],
+            -row['affected_per_gpu_hour'], row['request_id']))
+        return dict(ordered_profiles=result, modeled_time_scenarios=modeled, missing_components=components)
 
     def shared_ranking_probes(self, candidates):
         eligible = [trial for trial in candidates if trial['prediction']

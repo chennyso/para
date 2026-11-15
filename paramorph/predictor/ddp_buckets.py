@@ -24,7 +24,11 @@ def read_projection_bucket_document(path, expected_digest):
         document = {}
         for field in ('schema_version', 'rank', 'request', 'source', 'event_capture_scope', 'groups'):
             stream.seek(0)
-            document[field] = next(ijson.items(stream, field, use_float=True))
+            document[field] = next(ijson.items(stream, field, use_float=True),None)
+            if document[field] is None:
+                if field == 'event_capture_scope':
+                    return None
+                raise ValueError(f'DDP Bucket原始文件缺少必需字段：{field}')
         active_groups = {group['group_id'] for group in document['groups']
             if len(group['physical_ranks']) > 1}
         stream.seek(0)
@@ -120,6 +124,8 @@ def load_bucket_evidence(projector, request):
             if not expected or not path.is_file():
                 break
             row = read_projection_bucket_document(path, expected)
+            if row is None:
+                break
             if row['schema_version'] != 1 or row['rank'] != rank:
                 raise ValueError('DDP Bucket的训练计划或Rank身份不一致')
             active_groups = {group['group_id'] for group in row['groups']
@@ -329,10 +335,14 @@ def compile_bucket_tasks(projector, tasks, config, request, costs, phase):
             resources.update(used)
             payloads.append(dict(bucket_id=bucket['bucket_id'], payload_bytes=payload, dtype=dtype))
         components = projector._cost_components(costs[beginning:])
+        single_payload = payloads[0] if len(payloads) == 1 else {}
         tasks[key] = Task(key, logical_ranks[0], TaskType.NCCL_GENERIC, duration=projector._total(values),
             dependencies=sorted(dependencies), resource_requirements=tuple(sorted(resources)),
             metadata=dict(operation=f'ddp_bucket_{phase}', collective=collective,
                 participant_ranks=logical_ranks, group_id=group_id, physical_ranks=list(physical_ranks),
+                physical_group_ranks=list(physical_ranks), payload_bytes=single_payload.get('payload_bytes'),
+                communication_dtype=single_payload.get('dtype'),
+                overlap_collective_granularity='single_bucket' if single_payload else 'bucket_group',
                 communication_payloads=payloads, cost_components=components,
                 duration_evidence=sorted({reference for row in components for reference in row['evidence_ids']}),
                 evidence_ids=[evidence['profile_id']], buffer_aliases=['persistent_DDP_parameter_and_gradient_buffers'],

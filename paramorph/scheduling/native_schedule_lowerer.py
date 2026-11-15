@@ -33,6 +33,7 @@ def verify_native_execution_events(request, ranks):
     microbatches = request['global_batch'] // (request['dp'] * request['micro_batch'])
     sends, receives = Counter(), Counter()
     compute_count, exchanges, inline_waits, asynchronous = 0, 0, 0, 0
+    async_launches, async_waits, async_consumers = {}, {}, {}
     observed_ranks = set()
     for row in ranks:
         if row['rank'] in observed_ranks:
@@ -41,6 +42,17 @@ def verify_native_execution_events(request, ranks):
         expected = native_stage_sequence(row['pp_rank'], request['pp'], request['vpp'], microbatches, group)
         by_step = defaultdict(list)
         for event in row['events']:
+            identity = event.get('identity', {})
+            if event['kind'] == 'pp_p2p_wait':
+                key = (row['rank'], event['step'], identity['message_id'], identity['role'])
+                if key in async_waits:
+                    raise ValueError('异步 P2P 等待事件重复')
+                async_waits[key] = (event['host_start_ns'], event['host_end_ns'])
+            for message_id in identity.get('async_input_message_ids', []):
+                key = (row['rank'], event['step'], message_id, 'recv')
+                if key in async_consumers:
+                    raise ValueError('异步 P2P 接收张量重复绑定到计算任务')
+                async_consumers[key] = event['host_start_ns']
             if event['kind'] in ('forward_compute', 'backward_compute', 'pp_p2p_exchange'):
                 by_step[event['step']].append(event)
         if not by_step or set(by_step) != {window['step'] for window in row['windows']}:
@@ -56,6 +68,9 @@ def verify_native_execution_events(request, ranks):
                 inline_waits += int(identity['completion_waited'])
                 asynchronous += int(not identity['completion_waited'])
                 for message in identity['messages']:
+                    if not identity['completion_waited']:
+                        key = (row['rank'], step, message['message_id'], message['role'])
+                        async_launches[key] = event['host_end_ns']
                     peer_key = (step, message['source'], message['destination'], message['direction'],
                         message['message_id'], identity['dtype'])
                     if message['role'] == 'send' and message['source'] == row['rank']:
@@ -71,9 +86,19 @@ def verify_native_execution_events(request, ranks):
         raise ValueError('原生执行事件未覆盖全部设备')
     if sends != receives or any(count != 1 for count in sends.values()):
         raise ValueError('原生 P2P 发送和接收事件无法逐条配对')
+    if set(async_waits) - async_launches.keys() or set(async_consumers) - async_launches.keys():
+        raise ValueError('异步等待或消费者缺少真实的消息启动事件')
+    if any(async_launches[key] > begin or begin > end for key, (begin, end) in async_waits.items()):
+        raise ValueError('异步 P2P 启动与等待的主机顺序不一致')
+    if any(key not in async_waits or async_waits[key][1] > begin for key, begin in async_consumers.items()):
+        raise ValueError('异步接收的计算消费者早于等待完成')
+    receive_keys = {key for key in async_launches if key[-1] == 'recv'}
+    complete = bool(async_launches) and set(async_waits) == set(async_launches) and set(async_consumers) == receive_keys
     return dict(ranks=world, ordered_compute_events=compute_count, p2p_exchanges=exchanges,
         matched_messages=sum(sends.values()), p2p_inline_waits=inline_waits, p2p_async_launches=asynchronous,
-        async_wait_order_verified=False, source='actual_native_schedule_runtime_events')
+        async_wait_events=len(async_waits), async_consumer_events=len(async_consumers),
+        async_wait_order_verified=complete, async_wait_order_scope='recorded_host_wait_and_tensor_consumer_order',
+        source='actual_native_schedule_runtime_events')
 
 
 def lower_native_schedule(tasks, config, settings, add_dependency):
@@ -127,6 +152,7 @@ def lower_native_schedule(tasks, config, settings, add_dependency):
                 task.metadata.update(launch_settings)
                 launch.metadata.update(launch_settings)
         for previous, following in zip(ordered, ordered[1:]):
-            for parent in (previous, *blocking[previous]):
+            launches=[tasks[transfer].metadata['launch_event'] for transfer in sends[previous]]
+            for parent in (previous, *launches, *blocking[previous]):
                 if parent not in tasks[following].dependencies:
                     add_dependency(parent, following)

@@ -67,11 +67,14 @@ class JointScopeCompiler:
         offload_varies = ('optimizer_offload_fraction' in opened or
             intent.values.get('optimizer_offload_fraction', normalized['optimizer_offload_fraction'])
             != normalized['optimizer_offload_fraction'])
+        overlap_varies = ('overlap_p2p' in opened or intent.values.get('overlap_p2p', parent.get('overlap_p2p', False))
+            != parent.get('overlap_p2p', False))
         for name in REWRITE_FIELDS:
             if name in GLOBAL_FIELDS or name in opened or name in derived:
                 continue
             if name not in intent.values and name not in intent.preserve and (
-                    (backend_varies and name in backend_fields) or (offload_varies and name == 'offload')):
+                    (backend_varies and name in backend_fields) or (offload_varies and name == 'offload')
+                    or (overlap_varies and name == 'batch_p2p_comm')):
                 continue
             if (parent.get('execution_backend', 'megatron_ddp') == 'megatron_ddp'
                     and not backend_varies and name not in intent.values

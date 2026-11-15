@@ -1,3 +1,4 @@
+from collections import defaultdict, deque
 from dataclasses import dataclass, field, replace, asdict
 from typing import List, Dict, Literal, Optional, Set, Tuple
 from enum import Enum
@@ -66,6 +67,7 @@ class ModelSpec:
     shared_expert_size: Optional[int] = None
     module_kinds: Optional[List[str]] = None
     finalize_grad_semantics: Optional[Dict] = None
+    gated_mlp: bool = True
 
     def __post_init__(self):
         if min(self.num_layers, self.hidden_size, self.num_attention_heads) < 1:
@@ -279,8 +281,16 @@ class ExecutionDAG:
     def add_dependency(self, from_task_id: str, to_task_id: str):
         if from_task_id not in self.tasks or to_task_id not in self.tasks:
             raise ValueError("Both tasks must exist in DAG")
-        if (from_task_id, to_task_id) not in self.edges:
-            self.edges.append((from_task_id, to_task_id))
+        if (getattr(self, '_indexed_edges', None) is not self.edges
+                or getattr(self, '_indexed_edge_count', -1) != len(self.edges)):
+            self._edge_index = set(self.edges)
+            self._indexed_edges = self.edges
+            self._indexed_edge_count = len(self.edges)
+        edge = (from_task_id, to_task_id)
+        if edge not in self._edge_index:
+            self.edges.append(edge)
+            self._edge_index.add(edge)
+            self._indexed_edge_count += 1
         if from_task_id not in self.tasks[to_task_id].dependencies:
             self.tasks[to_task_id].dependencies.append(from_task_id)
 
@@ -291,31 +301,23 @@ class ExecutionDAG:
         return [dst for src, dst in self.edges if src == task_id]
 
     def has_cycle(self) -> bool:
-        visited = set()
-        rec_stack = set()
-
-        def visit(node):
-            if node in rec_stack:
-                return True
-            if node in visited:
-                return False
-
-            visited.add(node)
-            rec_stack.add(node)
-
-            for successor in self.get_successors(node):
-                if visit(successor):
-                    return True
-
-            rec_stack.remove(node)
-            return False
-
-        for task_id in self.tasks:
-            if task_id not in visited:
-                if visit(task_id):
-                    return True
-
-        return False
+        degrees = dict.fromkeys(self.tasks, 0)
+        successors = defaultdict(list)
+        for source, destination in self.edges:
+            if source not in degrees or destination not in degrees:
+                raise ValueError('执行图依赖引用了不存在的任务')
+            successors[source].append(destination)
+            degrees[destination] += 1
+        ready = deque(task for task, degree in degrees.items() if degree == 0)
+        remaining = len(degrees)
+        while ready:
+            task = ready.popleft()
+            remaining -= 1
+            for destination in successors[task]:
+                degrees[destination] -= 1
+                if degrees[destination] == 0:
+                    ready.append(destination)
+        return remaining != 0
 
 
 @dataclass

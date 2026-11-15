@@ -47,9 +47,11 @@ def build_operator_graph(model, config):
                         [local_experts, ffn // config.etp, hidden]),
                     ('combine', ['routed_tokens', hidden], [tokens, hidden], None)])
             else:
+                expansion = 2 if model.gated_mlp else 1
                 operations.extend([
-                    ('gate_up', [tokens, hidden], [tokens, 2 * ffn // config.tp], [hidden, 2 * ffn // config.tp]),
-                    ('activation', [tokens, 2 * ffn // config.tp], [tokens, ffn // config.tp], None),
+                    ('gate_up' if model.gated_mlp else 'up', [tokens, hidden],
+                        [tokens, expansion * ffn // config.tp], [hidden, expansion * ffn // config.tp]),
+                    ('activation', [tokens, expansion * ffn // config.tp], [tokens, ffn // config.tp], None),
                     ('down', [tokens, ffn // config.tp], [tokens, hidden], [ffn // config.tp, hidden])])
             operations.append(('mlp_residual', [tokens, hidden], [tokens, hidden], None))
         previous = input_id
@@ -187,9 +189,9 @@ def read_model(path, parameter_metadata_path=None):
             config.get('max_position_embeddings', 0) * config['hidden_size']
             if position_kind in ('learned_absolute', 'learned') else 0),
         position_embedding_group_policy='first_only',
-        non_tensor_parallel_grad_elements_per_layer=2 * config['hidden_size'],
+        non_tensor_parallel_grad_elements_per_layer=(4 if config.get('normalization_has_bias', False) else 2) * config['hidden_size'],
         qk_layernorm_grad_elements_per_layer=2 * head_dimension if qk_layernorm else 0,
-        final_layernorm_grad_elements=config['hidden_size'],
+        final_layernorm_grad_elements=(2 if config.get('normalization_has_bias', False) else 1) * config['hidden_size'],
         qk_layernorm=qk_layernorm,
         source='actual_model_configuration_and_megatron_finalize_model_grads_semantics')
     model = ModelSpec(config.get('_name_or_path', path.parent.name), layers,
@@ -198,7 +200,7 @@ def read_model(path, parameter_metadata_path=None):
         num_query_groups=config.get('num_key_value_heads'), moe_top_k=config.get('num_experts_per_tok'),
         shared_expert_size=config.get('shared_expert_intermediate_size',
             config.get('moe_shared_expert_intermediate_size')), module_kinds=module_kinds,
-        finalize_grad_semantics=finalize_grad_semantics)
+        finalize_grad_semantics=finalize_grad_semantics, gated_mlp=config.get('gated_mlp', True))
     parameter_metadata = (bind_checkpoint_parameters(
         json.loads(Path(parameter_metadata_path).read_text()), config)
         if parameter_metadata_path is not None else None)

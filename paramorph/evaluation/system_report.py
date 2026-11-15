@@ -8,7 +8,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from evaluation.prediction_metrics import (
-    comparable_identity, measured_trials, prediction_metrics, prediction_provenance, prediction_samples,
+    comparable_identity, held_out_memory_admission, held_out_ranking, measured_trials,
+    prediction_metrics, prediction_provenance, prediction_samples,
 )
 
 
@@ -110,7 +111,9 @@ def generate_report(store, output):
             key=lambda row: row['measurement']['tokens_per_second'], default=None),
         numerical_equivalence_certified=all(row['measurement'].get('numerical_equivalence_certified', False) for row in measured) if measured else False,
         coverage_scope='recorded_real_trials_only', prediction_metrics=metrics,
-        independent_prediction_metrics=independent_metrics, search_efficiency=efficiency)
+        independent_prediction_metrics=independent_metrics, held_out_candidate_ranking=held_out_ranking(tested),
+        held_out_memory_admission=held_out_memory_admission(trials),
+        search_efficiency=efficiency)
     if tested:
         figure, axis = plt.subplots(figsize=(5, 4))
         actual = [row['measurement']['step_seconds'] for row in tested]

@@ -76,7 +76,8 @@ INSTRUCTIONS = (
     '依据结构、通信、显存、调度及本组历史选择联合参数；改变并行组合后重新判断MBS、重计算和布局。'
     'physical_parallel_alternatives是不同TP/PP组合的通信放置与层归属假设。局部尝试未改善时，'
     '用这些证据判断是否值得改变全局并行；分组数量、层数和部分成本不能直接用于吞吐排序。'
-    'schedule_controls基于本组通过训练的父配置和原生事件顺序；分别考虑仅改P2P重叠或仅改分组的调查。'
+    'schedule_controls基于本组通过训练的父配置和原生事件顺序。关闭P2P重叠时可单独调整batch_p2p_comm，'
+    '比较批量和逐条提交；开启P2P重叠时必须关闭batch_p2p_comm。'
     '提交单变量调查时，parallel和ranks沿用父配置，只开放该变量并在allowed_ranges提交目标值。'
     '比较实测显存、硬件容量、节点间通信与调度证据，自主判断应验证调度、分片、重计算或全局并行。'
     '切换存储后端或重计算需要说明容量证据或具体计算收益；已失败的配置避免重复提交。'
@@ -110,7 +111,9 @@ def parent_row(request):
         recompute=request['recompute'], modules=policy.get('recompute_modules', []),
         optimizer_offload=request.get('optimizer_offload_fraction', 0),
         transfer_overlap=request.get('optimizer_transfer_overlap', False),
-        p2p_overlap=request.get('overlap_p2p', False), ranks=request['rank_mapping'],
+        p2p_overlap=request.get('overlap_p2p', False),
+        batch_p2p_comm=request.get('batch_p2p_comm', not request.get('overlap_p2p', False)),
+        ranks=request['rank_mapping'],
         bucket=request.get('bucket_elements', 40000000), schedule=request.get('pipeline_schedule', '1f1b'),
         state=state)
 
@@ -218,7 +221,7 @@ def observation(context, request, count):
             'microbatch_group', 'p2p_overlap', 'optimizer_offload'], rows=rows),
         evidence_refs=context.get('diagnosis', {}).get('evidence_refs', []))
     result['joint_scope_fields'] = ['vpp', 'micro_batch', 'group', 'decoder_chunks', 'recompute',
-        'memory_policy', 'pipeline_schedule', 'overlap_p2p', 'execution_backend', 'optimizer_sharding',
+        'memory_policy', 'pipeline_schedule', 'overlap_p2p', 'batch_p2p_comm', 'execution_backend', 'optimizer_sharding',
         'optimizer_offload_fraction', 'optimizer_transfer_overlap', 'optimizer_pin_cpu_params']
     if 'megatron_fsdp' in result['supported_backends']:
         result['native_fsdp_constraints'] = dict(expert_tensor_parallel_size=1,

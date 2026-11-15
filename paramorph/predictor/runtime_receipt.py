@@ -1,5 +1,6 @@
 from contracts import fingerprint
 from ddp_overlap import DDP_OVERLAP_FIELDS
+from experiments.training_protocol import optimizer_schedule, training_data_contract
 from predictor.profile_database import effective_execution_config
 from scheduling.native_microbatches import verify_native_schedule
 
@@ -33,7 +34,8 @@ def effective_runtime_receipt(request, source_hashes, manifests):
         'optimizer_cpu_copy_mode',
         'optimizer_state_dtypes', 'precision_aware_optimizer', 'recompute_granularity',
         'recompute_modules', 'recompute_num_layers', 'overlap_grad_reduce',
-        'overlap_param_gather', 'gradient_bucket_size', 'native_pipeline_schedule')
+        'overlap_param_gather', 'gradient_bucket_size', 'native_pipeline_schedule',
+        'scheduler_configuration', 'training_data_contract', 'training_seed', 'training_data_seed')
     observed = {}
     for name in fields:
         values = [row[name] for row in manifests if name in row]
@@ -69,6 +71,15 @@ def effective_runtime_receipt(request, source_hashes, manifests):
         optimizer_sharding=request.get('optimizer_sharding', 'distributed'))
     fixed.update({name: request[name] for name in ('optimizer_pin_cpu_params', 'optimizer_cpu_copy_mode')
         if name in request})
+    if 'training_protocol.py' in source_hashes:
+        fixed['training_data_contract'] = training_data_contract(request)
+        schedule_config = optimizer_schedule(request)
+        if schedule_config is not None:
+            fixed['scheduler_configuration'] = schedule_config
+        for request_key, manifest_key in (('random_seed', 'training_seed'),
+                ('data_random_seed', 'training_data_seed')):
+            if request_key in request:
+                fixed[manifest_key] = request[request_key]
     for name, value in fixed.items():
         if observed.get(name) != value:
             raise RuntimeReceiptError(f'原生训练设置缺失或与请求不同：{name}')
@@ -90,7 +101,11 @@ def effective_runtime_receipt(request, source_hashes, manifests):
     return dict(effective_config=effective, effective_plan_hash=fingerprint(
         dict(config=effective, backend_source_hashes=source_hashes)),
         runtime_observed_fields=sorted(observed), runtime_rank_count=len(manifests),
-        native_pipeline_schedule=schedule or None, schedule_identity=fingerprint(schedule) if schedule else None)
+        native_pipeline_schedule=schedule or None, schedule_identity=fingerprint(schedule) if schedule else None,
+        training_protocol_observed={key: observed[key] for key in ('scheduler_configuration',
+            'training_data_contract', 'training_seed', 'training_data_seed') if key in observed},
+        nccl_environment_per_rank={str(row.get('rank', index)): row['nccl_environment']
+            for index, row in enumerate(manifests) if 'nccl_environment' in row})
 
 
 def validate_training_result(record, request, source_hashes, manifests):

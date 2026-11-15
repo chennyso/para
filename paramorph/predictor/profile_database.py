@@ -7,6 +7,7 @@ from dataclasses import asdict
 from pathlib import Path
 from core_data_models import MemoryPolicy
 from ddp_overlap import DDP_OVERLAP_FIELDS, resolve_ddp_overlap
+from experiments.training_protocol import optimizer_schedule, training_data_contract
 
 from .measured_modules import annotate_measurement_semantics
 
@@ -19,7 +20,7 @@ EXECUTION_FIELDS = ('model', 'checkpoint', 'data', 'tp', 'cp', 'pp', 'dp', 'ep',
 EXECUTION_FIELDS += ('etp', 'expert_dp', 'rank_mapping', 'pipeline_schedule', 'optimizer_sharding')
 EXECUTION_FIELDS += ('precision', 'optimizer', 'optimizer_config', 'attention_backend',
     'gradient_path', 'fused_cross_entropy', 'mlp_recompute_every', 'communication_executor_protocol',
-    'hardware_fingerprint', 'backend_fingerprint', 'random_seed', 'loss_normalization',
+    'hardware_fingerprint', 'backend_fingerprint', 'random_seed', 'data_random_seed', 'loss_normalization',
     'precision_aware_optimizer')
 EXECUTION_FIELDS += ('execution_backend', 'fsdp_sharding_strategy', 'dense_sharding_strategy',
     'expert_sharding_strategy', 'dp_inner_size', 'dp_outer_size', 'outer_sharding_strategy',
@@ -30,7 +31,7 @@ EXECUTION_FIELDS += ('execution_backend', 'fsdp_sharding_strategy', 'dense_shard
 EXECUTION_FIELDS += ('pipeline_dtype', 'sequence_parallel', 'clip_grad')
 EXECUTION_FIELDS += ('main_grads_dtype', 'main_params_dtype', 'exp_avg_dtype', 'exp_avg_sq_dtype')
 EXECUTION_FIELDS += DDP_OVERLAP_FIELDS
-PROFILE_SIGNATURE_REVISION = 'native_backend_effective_execution_v6'
+PROFILE_SIGNATURE_REVISION = 'native_backend_effective_execution_v7'
 
 
 def resolved_cuda_connections(request):
@@ -61,13 +62,15 @@ def normalized_execution(request):
     resolved = {key: request.get(key) for key in EXECUTION_FIELDS}
     if 'fp16_bounded_adam_sha256' in request:
         resolved['fp16_bounded_adam_sha256'] = request['fp16_bounded_adam_sha256']
-    if 'optimizer_schedule' in request:
-        resolved['optimizer_schedule'] = request['optimizer_schedule']
+    if 'optimizer_hyperparameters' in request:
         resolved['optimizer_hyperparameters'] = request['optimizer_hyperparameters']
+    if 'optimizer_schedule' in request or ('optimizer_hyperparameters' in request
+            and {'warmup', 'measured'} <= request.keys()):
+        resolved['optimizer_schedule'] = optimizer_schedule(request)
     if request.get('native_uniform_pipeline_layout', False):
         resolved['native_uniform_pipeline_layout'] = True
-    if 'training_data_contract' in request:
-        resolved['training_data_contract'] = request['training_data_contract']
+    if 'training_data_contract' in request or {'warmup', 'measured', 'global_batch'} <= request.keys():
+        resolved['training_data_contract'] = training_data_contract(request)
     if request.get('record_native_schedule'):
         overlap = request.get('overlap_p2p', False)
         resolved['batch_p2p_comm'] = request.get('batch_p2p_comm', not overlap)
@@ -76,6 +79,17 @@ def normalized_execution(request):
         resolved['gpus_per_worker'] = request['gpus_per_worker']
     if request.get('memory_policy') is not None:
         resolved['memory_policy'] = asdict(MemoryPolicy(**request['memory_policy']))
+        for field in ('activation_offload_modules', 'recompute_modules'):
+            resolved['memory_policy'][field] = list(resolved['memory_policy'][field])
+        default_full = asdict(MemoryPolicy(recompute_granularity='full', reuse_activation_slots=False))
+        for field in ('activation_offload_modules', 'recompute_modules'):
+            default_full[field] = list(default_full[field])
+        if (request.get('execution_backend', 'megatron_ddp') == 'megatron_ddp'
+                and request['recompute'] == 'full' and not request.get('offload', False)
+                and not request.get('optimizer_offload_fraction', 0)
+                and not request.get('activation_cpu_offload_layers', 0)
+                and resolved['memory_policy'] == default_full):
+            resolved['memory_policy'] = None
     resolved['optimizer'] = request.get('optimizer', 'adam')
     resolved['clip_grad'] = resolved_clip_grad(request)
     resolved['bucket_elements'] = resolved_bucket_elements(request)
@@ -83,7 +97,7 @@ def normalized_execution(request):
     world = request['node_count'] * request['gpus_per_node']
     resolved['etp'] = request.get('etp', request['tp'])
     resolved['expert_dp'] = request.get('expert_dp', world // (resolved['etp'] * request['ep'] * request['pp']))
-    resolved['rank_mapping'] = request.get('rank_mapping', list(range(world)))
+    resolved['rank_mapping'] = list(request.get('rank_mapping', range(world)))
     resolved['pipeline_schedule'] = request.get('pipeline_schedule', 'interleaved_1f1b' if request['vpp'] > 1 else '1f1b')
     resolved['optimizer_sharding'] = request.get('optimizer_sharding', 'distributed')
     resolved['optimizer_offload_fraction'] = float(request.get('optimizer_offload_fraction', 0.0))
@@ -158,7 +172,7 @@ def same_training_plan(first, second):
     for field in ('backend_fingerprint', 'hardware_fingerprint'):
         left.pop(field)
         right.pop(field)
-    return left == right and first['decoder_chunks'] == second['decoder_chunks']
+    return left == right and list(first['decoder_chunks']) == list(second['decoder_chunks'])
 
 
 def observed_ddp_overlap(directory, world):
@@ -308,9 +322,18 @@ class ProfileDatabase:
         return [(identifier, dict(profile)) for identifier, profile in self._measured_profile_cache[1]]
 
     def add_overlap(self, identifier, benchmark):
-        if benchmark['source'] != 'real_gpu_compute_communication_microbenchmark':
+        if benchmark['source'] == 'paired_native_component_service_time_calibration':
+            assert benchmark['protocol']=='paired_component_services_v1' and benchmark['units']
+            identifiers = [benchmark['isolated_profile_id'],*benchmark['concurrent_profile_ids']]
+            assert len(identifiers)==3 and len(set(identifiers))==3
+            known = {row[0] for row in self.connection.execute('SELECT id FROM profiles')}
+            assert set(identifiers)<=known
+            for row in benchmark['units'].values():
+                assert row['gamma']>=1 and math.isfinite(row['gamma']) and row['isolated_ms']>0
+                assert len(row['concurrent_ms'])==2 and all(value>0 and math.isfinite(value) for value in row['concurrent_ms'])
+        elif benchmark['source'] != 'real_gpu_compute_communication_microbenchmark':
             raise ValueError('计算通信重叠成本需要真实GPU并发测量来源')
-        if benchmark['gamma'] < 1 or not benchmark['samples']:
+        elif benchmark['gamma'] < 1 or not benchmark['samples']:
             raise ValueError('计算通信重叠测量需要有效减速系数与全部样本')
         encoded = json.dumps(benchmark, sort_keys=True, allow_nan=False)
         existing = self.connection.execute('SELECT document FROM overlap_profiles WHERE id=?',
@@ -477,13 +500,19 @@ class ProfileDatabase:
         identity_fields = ('model', 'checkpoint', 'precision', 'attention_backend',
             'cross_entropy_impl', 'optimizer_sharding', 'execution_backend',
             'dense_sharding_strategy', 'expert_sharding_strategy', 'sequence_parallel',
-            'pipeline_dtype', 'clip_grad', *DDP_OVERLAP_FIELDS)
+            'pipeline_dtype', 'clip_grad', 'memory_policy', 'mlp_recompute_every',
+            'megatron_fsdp_version', 'fsdp_prefetch', *DDP_OVERLAP_FIELDS)
         output = []
         target = normalized_execution(request)
         for identifier, encoded in self.connection.execute('SELECT id, document FROM profiles ORDER BY id'):
             document = json.loads(encoded)
             measured_request = self.profile_request(document)
+            if (measured_request.get('paramorph_fsdp_component_isolation')
+                    and not request.get('paramorph_fsdp_component_isolation')):
+                continue
             previous = normalized_execution(measured_request)
+            if measured_request.get('recompute_num_layers') != request.get('recompute_num_layers'):
+                continue
             if blind and same_training_plan(measured_request, request):
                 continue
             if any(previous.get(key) != target.get(key) for key in identity_fields):

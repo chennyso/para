@@ -29,7 +29,7 @@ from scheduling.task_graph_builder import TaskGraphBuilder
 
 DTYPE_BYTES = {'bfloat16': 2, 'float16': 2, 'float32': 4}
 
-PROJECTION_REVISION = 'native_event_graph_v44_phased_p2p_and_overlap_conditions'
+PROJECTION_REVISION = 'native_event_graph_v50_cost_identity_and_memory_policy'
 
 OPTIMIZER_PROFILE_FIELDS = (
     'model', 'checkpoint', 'optimizer', 'optimizer_config', 'optimizer_sharding',
@@ -71,6 +71,8 @@ class DAGProjector:
         self.module_profiles = {}
         self.optimizer_profiles = {}
         self.reusable_profile = None
+        self.native_component_context = None
+        self.forced_component_profile_id = None
         self.optimizer_profile = None
         self.parameter_counts_cache = {}
         self.mode = 'hybrid'
@@ -192,6 +194,13 @@ class DAGProjector:
                 dtype=communication_dtype)
         result = deepcopy(self.cost_cache[identity_key])
         result.update(cost_key=identity_key, projection_operation=collective)
+        domain = result.get('calibration_domain')
+        measured_range = result.get('measured_payload_range') or (
+            domain.get('measured_payload_range') if isinstance(domain,dict) else None)
+        if (result.get('profiling_request') and measured_range
+                and not measured_range[0] <= payload_bytes <= measured_range[1]):
+            result.update(status='NEEDS_PROFILE',diagnostic_extrapolated_ms=result['milliseconds'],
+                milliseconds=None,reason='当前通信消息大小超出实际测量范围，需要目标消息采样')
         requests = [result['profiling_request']] if result.get('profiling_request') else []
         requests.extend(result.get('profiling_targets', []))
         for request in requests:
@@ -431,12 +440,13 @@ class DAGProjector:
                     phase, rank, config, request, costs, layer)])
         else:
             ffn = model.ffn_hidden_size // config.tp
+            expansion = 2 if model.gated_mlp else 1
             if config.use_sequence_parallel and config.tp > 1:
                 values.append(self._communication('all_gather', payload, self._group('tp', rank), costs)[0])
-            values.extend([self._gemm('gate_up', tokens, 2 * ffn, hidden, phase,
+            values.extend([self._gemm('gate_up' if model.gated_mlp else 'up', tokens, expansion * ffn, hidden, phase,
                                      rank, config, request, costs, layer),
-                           self._elementwise('swiglu', tokens * ffn * 8,
-                             tokens * ffn * element_bytes * 3, phase, rank, config, request, costs, layer),
+                           self._elementwise('swiglu' if model.gated_mlp else 'gelu', tokens * ffn * 8,
+                             tokens * ffn * element_bytes * (expansion+1), phase, rank, config, request, costs, layer),
                            self._gemm('down', tokens, hidden, ffn, phase,
                                       rank, config, request, costs, layer)])
             values.append(self._communication(output_collective, payload, self._group('tp', rank), costs)[0])
@@ -468,11 +478,12 @@ class DAGProjector:
             values.append(self._compute('attention', features, 'recomputation', rank, config, request, costs, layer_id=layer))
         if 'mlp' in modules:
             ffn = self.model.ffn_hidden_size // config.tp
+            expansion = 2 if self.model.gated_mlp else 1
             if config.use_sequence_parallel and config.tp > 1:
                 values.append(self._communication('all_gather', local * hidden * width, self._group('tp', rank), costs)[0])
-            values.extend((self._gemm('gate_up_recompute', tokens, 2 * ffn, hidden,
+            values.extend((self._gemm('gate_up_recompute' if self.model.gated_mlp else 'up_recompute', tokens, expansion * ffn, hidden,
                 'recomputation', rank, config, request, costs, layer),
-                self._elementwise('swiglu_recompute', tokens * ffn * 8, tokens * ffn * width * 3,
+                self._elementwise('swiglu_recompute' if self.model.gated_mlp else 'gelu_recompute', tokens * ffn * 8, tokens * ffn * width * (expansion+1),
                     'recomputation', rank, config, request, costs, layer),
                 self._gemm('down_recompute', tokens, hidden, ffn,
                     'recomputation', rank, config, request, costs, layer)))
@@ -529,7 +540,8 @@ class DAGProjector:
                     dense[rank] += counts['dense']
                     expert[rank] += counts['expert']
                     continue
-                dense[rank] += model.hidden_size * ((heads + 2 * kv) * dimension + heads * dimension) + 2 * model.hidden_size
+                dense[rank] += model.hidden_size * ((heads + 2 * kv) * dimension + heads * dimension)
+                dense[rank] += (4 if structure.get('normalization_has_bias', False) else 2) * model.hidden_size
                 if (model.finalize_grad_semantics or {}).get('qk_layernorm', False):
                     dense[rank] += 2 * dimension
                 if model.layer_types[layer] == LayerType.MOE:
@@ -538,11 +550,11 @@ class DAGProjector:
                     if model.shared_expert_size:
                         dense[rank] += 3 * model.hidden_size * model.shared_expert_size // config.tp
                 else:
-                    dense[rank] += 3 * model.hidden_size * model.ffn_hidden_size // config.tp
+                    dense[rank] += (3 if model.gated_mlp else 2) * model.hidden_size * model.ffn_hidden_size // config.tp
                 if structure.get('attention_bias', structure.get('add_bias_linear', False)):
                     dense[rank] += (heads + 2 * kv) * dimension + model.hidden_size
                 if structure.get('mlp_bias', structure.get('add_bias_linear', False)):
-                    dense[rank] += 2 * model.ffn_hidden_size // config.tp + model.hidden_size
+                    dense[rank] += (2 if model.gated_mlp else 1) * model.ffn_hidden_size // config.tp + model.hidden_size
             boundary = {} if self.reusable_profile is None else self.reusable_profile.get('boundary_parameter_counts', {})
             category = 'both' if config.pp == 1 else 'first' if physical_stage == 0 else 'last' if physical_stage == config.pp - 1 else 'internal'
             if not model.num_experts and category in boundary:
@@ -555,10 +567,12 @@ class DAGProjector:
                 continue
             if physical_stage == 0:
                 dense[rank] += vocab * model.hidden_size // config.tp
+                if structure.get('position_embedding_type') == 'learned_absolute':
+                    dense[rank] += structure['max_position_embeddings'] * model.hidden_size
             if physical_stage == config.pp - 1:
                 if config.pp > 1 or not structure.get('tie_word_embeddings', False):
                     dense[rank] += vocab * model.hidden_size // config.tp
-                dense[rank] += model.hidden_size
+                dense[rank] += (2 if structure.get('normalization_has_bias', False) else 1) * model.hidden_size
         return dict(dense=dense, expert=expert, padded_vocab_size=vocab)
 
     def _state_memory(self, counts, config, request):
@@ -620,7 +634,7 @@ class DAGProjector:
                     else:
                         total += sum(distribution['expert_token_counts']) * self.model.ffn_hidden_size // config.etp * width * 3
                 else:
-                    total += tokens * self.model.ffn_hidden_size // config.tp * width * 3
+                    total += tokens * self.model.ffn_hidden_size // config.tp * width * (3 if self.model.gated_mlp else 2)
             if (self.parameters.get('attention', {}).get('materializes_attention_scores', False)
                     and 'core_attn' not in recomputed):
                 total += config.micro_batch_size * heads * config.sequence_length // config.cp * config.sequence_length * width
@@ -650,6 +664,10 @@ class DAGProjector:
         return source, tasks, None
 
     def _select_reusable_profile(self, request):
+        from predictor.native_component_overlap import selected_component_profile
+        component_profile = selected_component_profile(self,request)
+        if component_profile is not None:
+            return component_profile
         if self.mode == 'analytical_only':
             return None
         actual_uuids = {str(row.get('uuid', row.get('gpu_uuid'))).removeprefix('GPU-').lower()
@@ -1003,6 +1021,8 @@ class DAGProjector:
     def memory_bound(self, request, *, blind=False):
         self.memory_missing = set()
         self.blind = blind
+        from predictor.native_component_overlap import context_record
+        self.native_component_context = context_record(self,request)
         self.current_plan_signature = plan_signature(request)
         self.dtype = request.get('precision', 'bfloat16').replace('torch.', '')
         if self.dtype not in DTYPE_BYTES:
@@ -1115,6 +1135,8 @@ class DAGProjector:
         if cost_mode not in ('hybrid', 'measured_only', 'analytical_only'):
             raise ValueError('预测成本模式需要hybrid、measured_only或者analytical_only')
         self.mode, self.cost_cache, self.memory_missing, self.blind = cost_mode, {}, set(), blind
+        from predictor.native_component_overlap import context_record
+        self.native_component_context = context_record(self,request)
         self.current_plan_signature = plan_signature(request)
         network = self.parameters.get('network', {})
         default_topology = dict(devices=self.topology.devices,
@@ -1336,6 +1358,19 @@ class DAGProjector:
                 task.metadata['communication_buffer_bytes'] = size
                 task.metadata['communication_phases'] = [phase for row in costs[cost_start:]
                     for phase in row.get('communication_phases', [])]
+                family = task.metadata.get('state_family')
+                if (family in ('dense', 'expert') and size > 0 and task.duration is not None
+                        and any(row.get('evidence_ids') for row in costs[cost_start:])):
+                    outer = task.task_type in (TaskType.FSDP_OUTER_GRAD_REDUCE, TaskType.FSDP_OUTER_PARAM_SYNC)
+                    if outer or type(task.region_id) is int:
+                        region = None if outer else regions[task.region_id]
+                        module_elements = (counts[family][task.rank] if outer else sum(
+                            (self.reusable_profile or {}).get('module_parameters', {}).get(str(layer), {}).get(family, 0)
+                            for layer in range(region.layer_start, region.layer_end)))
+                        if module_elements > 0:
+                            task.metadata['partition_cost_basis'] = dict(scope='physical_stage' if outer else 'region',
+                                reference_elements=module_elements, elements_per_parameter={family: 1.0},
+                                source='locally_scaled_observed_fsdp_collective')
             elif task.task_type == TaskType.FSDP_RESHARD:
                 task.duration = 0.0
                 task.resource_requirements = ()
@@ -1368,9 +1403,27 @@ class DAGProjector:
                                     f'当前DAG投影不支持独立任务：{task.task_type.value}')
             task.metadata['cost_components'] = [*reused_components,
                 *self._cost_components(costs[task_cost_start:])]
+            if task.duration is None:
+                missing = {item['cost_key']: item['profile_required_occurrence_count']
+                    for item in self._profiling_requests(costs[task_cost_start:])
+                    if item['profile_required_occurrence_count'] and item.get('cost_key')}
+                if missing:
+                    task.metadata['missing_cost_keys'] = sorted(missing)
+                    task.metadata['missing_cost_occurrences'] = missing
+            if (task.task_type in (TaskType.OPTIMIZER_PREPARE, TaskType.GRADIENT_NORM,
+                    TaskType.GRADIENT_CLIP, TaskType.OPTIMIZER_STEP)
+                    and task.duration and request.get('execution_backend', 'megatron_ddp') == 'megatron_ddp'
+                    and any(row.get('evidence_ids') for row in costs[task_cost_start:])):
+                sharded = request.get('optimizer_sharding', 'distributed') == 'distributed'
+                weights = dict(dense=1 / len(self._group('dp_cp', task.rank)) if sharded else 1.0,
+                    expert=1 / len(self._group('expert_dp', task.rank)) if sharded else 1.0)
+                task.metadata['partition_cost_basis'] = dict(scope='physical_stage',
+                    reference_elements=sum(counts[family][task.rank] * factor for family, factor in weights.items()),
+                    elements_per_parameter=weights, source='locally_scaled_measured_optimizer_ownership')
             kernel_rows = [row for row in costs[task_cost_start:] if row.get('milliseconds')]
             if (task.task_type in (TaskType.FORWARD_COMPUTE, TaskType.BACKWARD_COMPUTE)
-                    and not reused_components and len(kernel_rows) == 1 and kernel_rows[0]['single_gemm']):
+                    and not reused_components and len(kernel_rows) == 1
+                    and kernel_rows[0].get('single_gemm') is True):
                 identity = kernel_rows[0].get('identity') or {}
                 shape = identity.get('features') or {}
                 if set(shape) == {'M', 'N', 'K'} and all(type(value) is int and value > 0 for value in shape.values()):
@@ -1385,6 +1438,8 @@ class DAGProjector:
                 raise ValueError(f'任务耗时与成本组成不一致：{key}')
         self._gradient_tasks(tasks, counts, config, request, costs)
         self._parameter_gather_tasks(tasks, counts, config, request, costs)
+        from predictor.native_component_overlap import bind_components
+        bind_components(self,tasks)
         if any(task.duration is None for task in tasks.values()):
             report = self._report(request, source, costs, started, 'NEEDS_PROFILE', '候选部分任务缺少可靠成本')
             report['partial_execution_graph'] = dict(task_count=len(tasks),
@@ -1407,6 +1462,28 @@ class DAGProjector:
                 reason='计算通信重叠缺少当前Kernel、Collective和物理进程组的减速测量',
                 profiling_request=dict(request_identity,
                     cost_key=fingerprint(request_identity))))
+        blocked_overlap = [row for row in resource_replay['missing_overlap_profiles']
+            if row.get('condition') is None]
+        if blocked_overlap:
+            blockers, affected = Counter(), set()
+            physical_ranks = Counter()
+            for pair in blocked_overlap:
+                compute, communication = (tasks[pair[key]] for key in ('compute_task_id', 'communication_task_id'))
+                physical_ranks[self.groups['rank_mapping'][compute.rank]] += 1
+                affected.update((compute.task_id, communication.task_id))
+                if not compute.metadata.get('overlap_kernel'):
+                    blockers[compute.metadata.get('execution_granularity', 'compute_without_kernel_identity')] += 1
+                if communication.metadata.get('overlap_collective_granularity') == 'bucket_group':
+                    blockers['multi_bucket_collective_requires_native_events'] += 1
+            capture = dict(kind='native_overlap_trace', execution_signature=plan_signature(request),
+                profile_ranks=[rank for rank, _ in sorted(physical_ranks.items(),
+                    key=lambda row: (-row[1], row[0]))[:2]],
+                blocked_pairs=len(blocked_overlap), affected_task_count=len(affected),
+                blockers=dict(blockers))
+            costs.append(dict(status='NEEDS_PROFILE', milliseconds=None,
+                reason='复合层或分桶组缺少可用的并发观测，需要原生训练 CUDA 时间线',
+                profiling_request=dict(capture, cost_key=fingerprint({key: capture[key]
+                    for key in ('kind', 'execution_signature', 'profile_ranks')}))))
         end = max(times, key=lambda key: times[key][1])
         step = times[end][1]
         fixed_step = max(value[1] for value in fixed_times.values())
@@ -1536,6 +1613,9 @@ class DAGProjector:
         overlap_unknown = bool(resource_replay['missing_overlap_profiles']) and profile_anchor is None
         report['performance']['ranking_eligible'] = not overlap_unknown
         if overlap_unknown:
+            report['performance']['diagnostic_dag_scenario'] = dict(
+                step_time_ms=predicted_step, tokens_per_second=request['global_batch'] * request['sequence'] * 1000 / predicted_step,
+                scope='缺少实测重叠减速的回放情景', ranking_eligible=False)
             report['prediction_status'] = 'NEEDS_PROFILE'
             report['validation'].update(status='REQUIRES_PROFILING',
                 reason='当前计算与通信并发条件缺少实测减速费用')
@@ -1701,6 +1781,9 @@ class DAGProjector:
             memory=dict(peak_per_rank_bytes={}, admission='REQUIRE_MEMORY_PROFILE',
                         physical_memory_status='UNKNOWN'), diagnosis={},
             evidence=dict(cost_mode=self.mode, predictor_revision=PROJECTION_REVISION,
+                native_component_profile_id=(None if self.native_component_context is None else self.native_component_context['id']),
+                native_component_cost_scope=(None if self.native_component_context is None
+                    else self.native_component_context['benchmark']['scope']),
                 optimizer_profile_id=(None if self.optimizer_profile is None else self.optimizer_profile['id']),
                 compatible_anchor_id=None, costs=costs, cost_coverage=dict(Counter(row['status'] for row in costs)),
                 blind=self.blind, candidate_plan_excluded_from_calibration=self.blind,

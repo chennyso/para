@@ -140,6 +140,13 @@ class ScheduleCostEvaluator:
     def _overlap_gamma(compute, communications, resource_model, missing):
         if not communications:
             return 1.0, []
+        contextual = compute.metadata.get('native_component_overlap')
+        if contextual is not None:
+            gamma = contextual['gamma']
+            if not math.isfinite(gamma) or gamma<1:
+                raise ValueError('原生组件并发服务成本系数非法')
+            return gamma,[(communication.task_id,gamma,[contextual['profile_id']])
+                for communication in communications]
         records = resource_model.get('compute_communication_slowdowns', [])
         matched = []
         for communication in communications:
